@@ -1,0 +1,22 @@
+# OS / editor junk
+Thumbs.db
+desktop.ini
+.DS_Store
+*~
+
+# Node (if ever added)
+node_modules/
+
+# Local env / secrets (config.js anon key is public by design and IS tracked)
+.env
+.env.*
+
+# Internal company docs & local-only files — NEVER publish to the public repo
+SOW/
+JDs/
+branding/
+deploy/
+New folder (2)/
+supabase-setup.sql
+supabase/
+.claude/
