@@ -301,6 +301,12 @@
     text-align: left; padding: 13px 16px;
     border-bottom: 1px solid var(--border);
   }
+  /* client trend sparkline + tag */
+  .spark { vertical-align: middle; display: inline-block; }
+  .trend-tag {
+    display: inline-block; margin-left: 8px; min-width: 56px; text-align: left;
+    font-size: 11px; font-weight: 700; letter-spacing: 0.02em; vertical-align: middle;
+  }
   table.dt th {
     background: var(--bg);
     font-weight: 600; color: var(--text-muted);
@@ -6446,6 +6452,43 @@ async function execRenderById(scorecardId, returnTo) {
   }
 }
 
+// Classify a 12-month client revenue series into a trend label + colour.
+function execTrend(series) {
+  const a = (series || []).map(x => +x || 0);
+  const n = a.length, sum = a.reduce((x, y) => x + y, 0);
+  if (!n || sum <= 0) return { tag: "—", color: "var(--muted)" };
+  const mean = sum / n, mx = Math.max(...a);
+  const nz = a.filter(x => x > 0).sort((x, y) => x - y);
+  const med = nz[Math.floor(nz.length / 2)] || 0;
+  const half = Math.floor(n / 2);
+  const avg = arr => arr.length ? arr.reduce((x, y) => x + y, 0) / arr.length : 0;
+  const first = avg(a.slice(0, half)), last = avg(a.slice(half));
+  // ramped up from a standing start in the first third → New
+  if (a.slice(0, Math.ceil(n / 3)).every(x => x === 0) && last > 0) return { tag: "New", color: "#7b2fbe" };
+  // one month dominates the rest → Spike
+  if (med > 0 && mx > med * 2.5 && mx > mean * 1.8) return { tag: "Spike", color: "#f79009" };
+  if (first > 0) {
+    const chg = (last - first) / first;
+    if (chg > 0.2) return { tag: "Grew", color: "#12b76a" };
+    if (chg < -0.2) return { tag: "Declined", color: "#f04438" };
+  } else if (last > 0) return { tag: "Grew", color: "#12b76a" };
+  return { tag: "Steady", color: "#6E7682" };
+}
+// Tiny inline-SVG sparkline for a monthly series.
+function execSparkline(series, color) {
+  const a = (series || []).map(x => +x || 0);
+  const n = a.length;
+  if (!n) return "";
+  const w = 94, h = 22, pad = 2.5;
+  const mx = Math.max(...a), mn = Math.min(...a), span = (mx - mn) || 1;
+  const X = i => pad + (n === 1 ? (w - 2 * pad) / 2 : i * (w - 2 * pad) / (n - 1));
+  const Y = v => h - pad - (v - mn) / span * (h - 2 * pad);
+  const pts = a.map((v, i) => `${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(" ");
+  const lx = X(n - 1).toFixed(1), ly = Y(a[n - 1]).toFixed(1);
+  return `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true">`
+    + `<polyline fill="none" stroke="${color}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" points="${pts}"/>`
+    + `<circle cx="${lx}" cy="${ly}" r="1.9" fill="${color}"/></svg>`;
+}
 function renderExecActualsPanel(st) {
   if (execIsFinance(st.type)) {
     return `<div class="notice info" style="margin:12px 0;">Finance scorecard — rated on group reporting, cash, controls, cost and team (no branch revenue feed).</div>`;
@@ -6479,12 +6522,29 @@ function renderExecActualsPanel(st) {
   const budFyTot = codes.reduce((s, c) => s + ((bud[c]||[]).reduce((a, x) => a + x, 0)), 0);
   const totVar = budTot ? ((totQ[3]-budTot)/Math.abs(budTot)*100) : null;
   // Top clients (actual, 12m) aggregated across the vertical's branches
-  const cmap = {};
-  codes.forEach(c => (((snap.customers||{})[c]||{}).customers||[]).forEach(cu => { cmap[cu.name] = (cmap[cu.name]||0) + (cu.revenue||0); }));
+  const cmap = {}, smap = {};
+  const nMon = months.length || 12;
+  codes.forEach(c => {
+    const cust = (snap.customers||{})[c] || {};
+    (cust.customers||[]).forEach(cu => { cmap[cu.name] = (cmap[cu.name]||0) + (cu.revenue||0); });
+    const ser = cust.series || {};
+    Object.keys(ser).forEach(name => {
+      const arr = ser[name] || [];
+      if (!smap[name]) smap[name] = new Array(nMon).fill(0);
+      for (let i = 0; i < arr.length && i < nMon; i++) smap[name][i] += (+arr[i] || 0);
+    });
+  });
   const clients = Object.entries(cmap).sort((a, b) => b[1] - a[1]);
   const ctot = clients.reduce((s, [, v]) => s + v, 0);
   const top2pct = ctot ? (clients.slice(0,2).reduce((s, [, v]) => s + v, 0) / ctot * 100) : 0;
-  const clientRows = clients.slice(0, 8).map(([n, v]) => `<tr><td>${escapeHtml(n)}</td>${money(v)}<td style="text-align:right;">${ctot?(v/ctot*100).toFixed(1)+'%':'—'}</td></tr>`).join("");
+  const haveSeries = Object.keys(smap).length > 0;
+  const clientRows = clients.slice(0, 8).map(([n, v]) => {
+    const t = execTrend(smap[n]);
+    const trendCell = haveSeries
+      ? `<td style="text-align:center;white-space:nowrap;">${execSparkline(smap[n], t.color)}<span class="trend-tag" style="color:${t.color};">${t.tag}</span></td>`
+      : "";
+    return `<tr><td>${escapeHtml(n)}</td>${money(v)}<td style="text-align:right;">${ctot?(v/ctot*100).toFixed(1)+'%':'—'}</td>${trendCell}</tr>`;
+  }).join("");
   return `
     <div style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin:12px 0;background:#f7f9fc;">
       <div style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;font-weight:600;">Financial results · ${escapeHtml(execVertical(st.type, st.ccs))} · actuals to ${escapeHtml((snap.meta||{}).month_label || "")}</div>
@@ -6493,8 +6553,8 @@ function renderExecActualsPanel(st) {
       <h4 style="margin:16px 0 4px;font-size:13px;color:var(--brand);">FY27 budget vs actual — Q1 (Jul–Sep 26)<span style="color:var(--muted);font-weight:400;font-size:11px;"> · the one quarter with both so far; fills as the year loads</span></h4>
       <div style="overflow-x:auto;"><table class="dt" style="margin:0;min-width:440px;"><thead><tr><th>Branch</th><th style="text-align:right;">Budget</th><th style="text-align:right;">Actual</th><th style="text-align:right;">Var</th></tr></thead><tbody>${bvaRows}<tr style="border-top:2px solid var(--border);font-weight:700;"><td>Total</td>${money(budTot)}${money(totQ[3])}<td style="text-align:right;color:${totVar>=0?'#12b76a':'#f04438'};">${totVar==null?'—':(totVar>=0?'+':'')+totVar.toFixed(0)+'%'}</td></tr></tbody></table></div>
       <div style="font-size:11.5px;color:var(--muted);margin-top:4px;">Full FY27 revenue budget (target) for this vertical: ${execFmtR(budFyTot)}.</div>
-      <h4 style="margin:16px 0 4px;font-size:13px;color:var(--brand);">Top clients — actual, rolling 12 m</h4>
-      <div style="overflow-x:auto;"><table class="dt" style="margin:0;min-width:360px;"><thead><tr><th>Client</th><th style="text-align:right;">Revenue</th><th style="text-align:right;">% of vertical</th></tr></thead><tbody>${clientRows}</tbody></table></div>
+      <h4 style="margin:16px 0 4px;font-size:13px;color:var(--brand);">Top clients — actual, rolling 12 m${haveSeries?` <span style="color:var(--muted);font-weight:400;font-size:11px;">· trend runs ${escapeHtml(months[0]||"")}→${escapeHtml(months[months.length-1]||"")}</span>`:""}</h4>
+      <div style="overflow-x:auto;"><table class="dt" style="margin:0;min-width:${haveSeries?"480px":"360px"};"><thead><tr><th>Client</th><th style="text-align:right;">Revenue</th><th style="text-align:right;">% of vertical</th>${haveSeries?'<th style="text-align:center;">Trend · 12 m</th>':""}</tr></thead><tbody>${clientRows}</tbody></table></div>
       <div style="font-size:12.5px;margin-top:8px;"><strong>Top-2 client concentration:</strong> <span style="color:${top2pct>50?'#f04438':'#12b76a'};font-weight:700;">${top2pct.toFixed(0)}%</span> <span style="color:var(--muted);">— the dependency metric behind the Growth KPI (target &lt;50%). You still assign the 1–10 ratings.</span></div>
     </div>`;
 }
