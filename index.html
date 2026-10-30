@@ -5494,6 +5494,20 @@ async function fetchMyAppraiserId() {
   const { data } = await sb.from("profiles").select("appraiser_id").eq("id", profile.id).maybeSingle();
   return data ? data.appraiser_id : null;
 }
+// Reporting lines live in the shared table shared_branch_appraisers (branch_code ->
+// appraising exec), seeded from the exec dashboards. Resolve a BM's Regional Executive
+// by their branch; fall back to the profiles.appraiser_id cache (and whatever the caller
+// passes) when the shared table isn't present yet or has no row for the branch.
+async function bmResolveAppraiser(branchCode, fallbackId) {
+  if (branchCode) {
+    try {
+      const { data, error } = await sb.from("shared_branch_appraisers")
+        .select("appraiser_id").eq("branch_code", branchCode).maybeSingle();
+      if (!error && data && data.appraiser_id) return data.appraiser_id;
+    } catch (_) { /* table may not exist yet — fall through to the cached appraiser */ }
+  }
+  return fallbackId || null;
+}
 
 /* =========================================================================
    BRANCH MANAGER — self check-in screen
@@ -5504,7 +5518,8 @@ async function showBMSelf() {
   await loadBmKras();
   const banner = document.getElementById("bm-self-banner");
   banner.innerHTML = `<div class="notice info"><strong>${escapeHtml(getRoleLabel(profile.job_role))}</strong> — monthly check-in with your Regional Executive.</div>`;
-  bmSelfAppraiserId = await fetchMyAppraiserId();
+  const { data: me } = await sb.from("profiles").select("appraiser_id, branch_code").eq("id", profile.id).maybeSingle();
+  bmSelfAppraiserId = await bmResolveAppraiser(me && me.branch_code, me && me.appraiser_id);
   if (!bmSelfYM) bmSelfYM = bmNowYM();
   loadBMSelfCurrent();
   renderRatingGuideInto(document.getElementById("bm-self-guide"));
@@ -5849,8 +5864,8 @@ async function openBMAdminCheckin(employeeId, year, month, returnTo) {
   body.innerHTML = '<div class="loader"></div>';
   try {
     await loadBmKras();
-    const { data: emp } = await sb.from("profiles").select("appraiser_id").eq("id", employeeId).maybeSingle();
-    const appraiserId = (emp && emp.appraiser_id) || profile.id;
+    const { data: emp } = await sb.from("profiles").select("appraiser_id, branch_code").eq("id", employeeId).maybeSingle();
+    const appraiserId = await bmResolveAppraiser(emp && emp.branch_code, (emp && emp.appraiser_id) || profile.id);
     const checkin = await bmGetOrCreateCheckin(employeeId, appraiserId, year, month);
     await bmRenderCheckinById(checkin.id, "exec", returnTo);
   } catch (err) {
