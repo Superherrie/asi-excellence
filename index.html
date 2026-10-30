@@ -551,7 +551,7 @@ values ('your.email@asi.co.za', 'Your Name', 'admin');</pre>
       </div>
 
       <div class="tab-panel" id="tab-admin-checkins">
-        <p class="help">All Branch Manager monthly check-ins. Click a row to view the completed sheet.</p>
+        <p class="help">Open or start any Branch Manager's monthly check-in, and set each manager's branch so their revenue metrics show on the sheet. Captured check-ins are listed below.</p>
         <div id="admin-checkins-list"></div>
       </div>
 
@@ -5751,14 +5751,49 @@ async function loadAdminCheckins() {
   const target = document.getElementById("admin-checkins-list");
   if (!target) return;
   target.innerHTML = '<div class="loader"></div>';
-  const { data, error } = await sb.from("bm_checkins")
-    .select("*, employee:profiles!bm_checkins_employee_id_fkey(name), appraiser:profiles!bm_checkins_appraiser_id_fkey(name)")
-    .order("period_year", { ascending: false }).order("period_month", { ascending: false });
-  if (error) { target.innerHTML = `<div class="notice error">${escapeHtml(error.message)}</div>`; return; }
-  if (!data || !data.length) { target.innerHTML = '<div class="empty-state">No Branch Manager check-ins captured yet.</div>'; return; }
-  target.innerHTML = `
-    <table class="dt"><thead><tr><th>Month</th><th>Branch Manager</th><th>Executive</th><th>Status</th><th>Score</th><th>%</th><th></th></tr></thead><tbody>
-      ${data.map(c => `<tr>
+  try {
+    await loadBmKras();
+    // roster of every Branch Manager (admin can open/start any of them)
+    const { data: bms, error } = await sb.from("profiles")
+      .select("id, name, appraiser_id, branch_code").eq("job_role", "branch_manager").order("name");
+    if (error) throw error;
+    // branch options from the actuals snapshot
+    const snap = await loadFinSnapshot();
+    const branchOpts = (snap && snap.branches)
+      ? Object.entries(snap.branches).map(([code, b]) => ({ code, name: (b && b.name) || code })).sort((a, b) => a.name.localeCompare(b.name))
+      : [];
+    const branchSelect = (bmId, cur) => `<select data-bm-branch-user="${bmId}" style="font-size:13px;padding:4px 6px;">
+        <option value="">— set branch —</option>
+        ${branchOpts.map(o => `<option value="${escapeHtml(o.code)}" ${o.code === cur ? "selected" : ""}>${escapeHtml(o.name)} (${escapeHtml(o.code)})</option>`).join("")}
+      </select>`;
+    // appraiser names
+    const apprIds = [...new Set((bms || []).map(b => b.appraiser_id).filter(Boolean))];
+    let apprName = {};
+    if (apprIds.length) { const { data: ap } = await sb.from("profiles").select("id, name").in("id", apprIds); apprName = Object.fromEntries((ap || []).map(a => [a.id, a.name])); }
+    // this month's check-in per BM
+    const { year, month } = bmNowYM();
+    const ids = (bms || []).map(b => b.id);
+    let byEmp = {};
+    if (ids.length) { const { data: cks } = await sb.from("bm_checkins").select("*").in("employee_id", ids).eq("period_year", year).eq("period_month", month); byEmp = Object.fromEntries((cks || []).map(c => [c.employee_id, c])); }
+    const rosterRows = (bms && bms.length) ? bms.map(b => {
+      const c = byEmp[b.id];
+      return `<tr>
+        <td><strong>${escapeHtml(b.name)}</strong></td>
+        <td>${branchSelect(b.id, b.branch_code || "")}</td>
+        <td>${escapeHtml(b.appraiser_id ? (apprName[b.appraiser_id] || "—") : "—")}</td>
+        <td>${c ? escapeHtml(BM_STATUS_LABEL[c.status] || c.status) : "Not started"}</td>
+        <td>${c && c.weighted_score != null ? c.weighted_score.toFixed(2) + " / 10" : "—"}</td>
+        <td style="white-space:nowrap;">
+          <button class="primary small" data-bm="open-admin" data-emp="${b.id}" data-year="${year}" data-month="${month}" data-return="admin">${c ? "Open" : "Start"}</button>
+          <button class="secondary small" data-bm="tracker" data-emp="${b.id}" data-year="${year}" data-return="admin">Tracker</button>
+        </td>
+      </tr>`;
+    }).join("") : `<tr><td colspan="6"><div class="empty-state" style="margin:0;">No Branch Managers yet. Set a user's Job Role to “Branch Manager” on the Users tab.</div></td></tr>`;
+    // all captured check-ins (history)
+    const { data: hist } = await sb.from("bm_checkins")
+      .select("*, employee:profiles!bm_checkins_employee_id_fkey(name), appraiser:profiles!bm_checkins_appraiser_id_fkey(name)")
+      .order("period_year", { ascending: false }).order("period_month", { ascending: false });
+    const histRows = (hist || []).map(c => `<tr>
         <td>${escapeHtml(bmMonthLabel(c.period_year, c.period_month))}</td>
         <td>${escapeHtml(c.employee ? c.employee.name : "—")}</td>
         <td>${escapeHtml(c.appraiser ? c.appraiser.name : "—")}</td>
@@ -5766,8 +5801,25 @@ async function loadAdminCheckins() {
         <td>${c.weighted_score != null ? c.weighted_score.toFixed(2) : "—"}</td>
         <td>${c.equivalent_pct != null ? c.equivalent_pct.toFixed(1) + "%" : "—"}</td>
         <td><button class="secondary small" data-bm="view" data-id="${c.id}" data-return="admin">View</button></td>
-      </tr>`).join("")}
-    </tbody></table>`;
+      </tr>`).join("");
+    target.innerHTML = `
+      <div class="notice info"><strong>This month:</strong> ${escapeHtml(bmMonthLabel(year, month))} — open or start any branch manager's check-in. Set each manager's <strong>branch</strong> to show their revenue metrics on the sheet.</div>
+      <table class="dt"><thead><tr><th>Branch Manager</th><th>Branch</th><th>Executive</th><th>Status</th><th>Score</th><th></th></tr></thead><tbody>${rosterRows}</tbody></table>
+      <h4 style="margin:20px 0 6px;font-size:14px;color:var(--brand);">All captured check-ins</h4>
+      ${(hist && hist.length)
+        ? `<table class="dt"><thead><tr><th>Month</th><th>Branch Manager</th><th>Executive</th><th>Status</th><th>Score</th><th>%</th><th></th></tr></thead><tbody>${histRows}</tbody></table>`
+        : '<div class="empty-state">No check-ins captured yet.</div>'}`;
+    target.querySelectorAll("[data-bm-branch-user]").forEach(sel => {
+      sel.addEventListener("change", async e => {
+        const id = e.target.dataset.bmBranchUser, code = e.target.value || null;
+        const { error: upErr } = await sb.from("profiles").update({ branch_code: code }).eq("id", id);
+        if (upErr) alert("Could not set branch: " + upErr.message);
+      });
+    });
+  } catch (err) {
+    console.error("[admin checkins]", err);
+    target.innerHTML = `<div class="notice error">Could not load check-ins: ${escapeHtml(err.message || String(err))}</div>`;
+  }
 }
 
 /* ---- open helpers ---- */
@@ -5789,6 +5841,22 @@ async function openBMViewCheckin(checkinId, returnTo) {
   await loadBmKras();
   await bmRenderCheckinById(checkinId, "view", returnTo);
 }
+// Admin opens/starts a check-in for any BM, preserving the BM's assigned
+// Regional Executive as the appraiser (falls back to the admin if none set).
+async function openBMAdminCheckin(employeeId, year, month, returnTo) {
+  showScreen("bm-checkin");
+  const body = document.getElementById("bm-checkin-body");
+  body.innerHTML = '<div class="loader"></div>';
+  try {
+    await loadBmKras();
+    const { data: emp } = await sb.from("profiles").select("appraiser_id").eq("id", employeeId).maybeSingle();
+    const appraiserId = (emp && emp.appraiser_id) || profile.id;
+    const checkin = await bmGetOrCreateCheckin(employeeId, appraiserId, year, month);
+    await bmRenderCheckinById(checkin.id, "exec", returnTo);
+  } catch (err) {
+    body.innerHTML = `<div class="notice error">Could not open check-in: ${escapeHtml(err.message || String(err))}</div>`;
+  }
+}
 async function bmRenderCheckinById(checkinId, mode, returnTo) {
   const body = document.getElementById("bm-checkin-body");
   try {
@@ -5797,9 +5865,17 @@ async function bmRenderCheckinById(checkinId, mode, returnTo) {
     const kras = await loadBmKras();
     const goals = await bmLoadGoals(c.id);
     const { prev, goals: prevGoals } = await bmLoadReviewGoals(c.employee_id, c.period_year, c.period_month);
-    const empName = await bmProfileName(c.employee_id);
+    const { data: emp } = await sb.from("profiles").select("name, branch_code").eq("id", c.employee_id).maybeSingle();
+    const empName = emp ? emp.name : await bmProfileName(c.employee_id);
     const execName = c.appraiser_id ? await bmProfileName(c.appraiser_id) : (mode === "exec" ? profile.name : "—");
-    bmCheckinState = { checkin: c, kras, goals, prevGoals, prevCheckin: prev, empName, execName, mode, returnTo };
+    // branch financials (same source as the exec panel), scoped to this BM's branch
+    const branchCode = emp ? emp.branch_code : null;
+    let snap = null, budget = {};
+    if (branchCode) {
+      snap = await loadFinSnapshot();
+      budget = await loadExecBudget([branchCode]);
+    }
+    bmCheckinState = { checkin: c, kras, goals, prevGoals, prevCheckin: prev, empName, execName, mode, returnTo, branchCode, snap, budget };
     renderBMCheckin(bmCheckinState);
   } catch (err) {
     body.innerHTML = `<div class="notice error">Could not load check-in: ${escapeHtml(err.message || String(err))}</div>`;
@@ -5807,6 +5883,79 @@ async function bmRenderCheckinById(checkinId, mode, returnTo) {
 }
 
 function bmKraLabel(key) { const k = bmKras.find(x => x.kra_key === key); return k ? k.label : (key ? key : "General"); }
+
+// Larger inline-SVG line chart for a branch's 12-month revenue.
+function bmLineChart(values, monthLabels, color) {
+  const a = (values || []).map(x => +x || 0);
+  const n = a.length;
+  if (!n) return "";
+  const w = 560, h = 132, padL = 8, padR = 8, padT = 12, padB = 20;
+  const mx = Math.max(...a), mn = Math.min(...a, 0), span = (mx - mn) || 1;
+  const X = i => padL + (n === 1 ? (w - padL - padR) / 2 : i * (w - padL - padR) / (n - 1));
+  const Y = v => h - padB - (v - mn) / span * (h - padT - padB);
+  const line = a.map((v, i) => `${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(" ");
+  const area = `${X(0).toFixed(1)},${h - padB} ${line} ${X(n - 1).toFixed(1)},${h - padB}`;
+  const dots = a.map((v, i) => `<circle cx="${X(i).toFixed(1)}" cy="${Y(v).toFixed(1)}" r="2.1" fill="${color}"/>`).join("");
+  const ticks = (monthLabels || []).map((m, i) => i % 2 === 0
+    ? `<text x="${X(i).toFixed(1)}" y="${h - 6}" font-size="9" fill="#6E7682" text-anchor="middle">${escapeHtml((m || "").split(" ")[0])}</text>` : "").join("");
+  return `<svg viewBox="0 0 ${w} ${h}" width="100%" style="max-width:${w}px;height:auto;display:block;" role="img" aria-label="Monthly revenue line chart">`
+    + `<polygon points="${area}" fill="${color}" opacity="0.08"/>`
+    + `<polyline points="${line}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`
+    + `${dots}${ticks}</svg>`;
+}
+
+// Branch financial panel for a Branch Manager check-in — single branch scope.
+// Mirrors the exec panel (revenue by quarter, 12-month line, GP, budget vs
+// actual, top clients with sparklines) but for one cost centre.
+function renderBMActualsPanel(branchCode, snap, budget) {
+  if (!branchCode) {
+    return `<div class="notice info" style="margin:12px 0;">Set this branch manager's <strong>branch</strong> on the admin <strong>Check-Ins</strong> tab to show revenue metrics here.</div>`;
+  }
+  if (!snap || !snap.branches || !snap.branches[branchCode]) {
+    return `<div class="notice warn" style="margin:12px 0;">No actuals loaded for branch <code>${escapeHtml(branchCode)}</code> — run <code>push_actuals_to_app.py</code> from the Monthly Reporting folder.</div>`;
+  }
+  const b = snap.branches[branchCode];
+  const months = (snap.meta && snap.meta.months) || [];
+  const m = b.monthly || {}, r12 = b.r12 || {};
+  const sales = (m.sales || []).map(x => +x || 0);
+  const q = execQuarterSplit(sales);
+  const fy = sales.reduce((s, x) => s + x, 0);
+  const gp = r12.sales ? (r12.gp / r12.sales * 100) : null;
+  const t = execTrend(sales);
+  const qLabel = qi => (months[qi*3] && months[qi*3+2]) ? `${months[qi*3].replace(/\s+\d+$/, "")}–${months[qi*3+2]}` : `Q${qi+1}`;
+  const money = v => `<td style="text-align:right;">${execFmtR(v)}</td>`;
+  const bud = (budget && budget[branchCode]) || null;
+  const bvaRow = bud ? (() => {
+    const a = q[3], bb = bud[0] || 0, v = bb ? ((a - bb) / Math.abs(bb) * 100) : null;
+    return `<div style="font-size:12.5px;margin-top:8px;"><strong>FY27 budget vs actual — Q1 (Jul–Sep 26):</strong> budget ${execFmtR(bb)} · actual ${execFmtR(a)} · <span style="color:${v>=0?'#12b76a':'#f04438'};font-weight:700;">${v==null?'—':(v>=0?'+':'')+v.toFixed(0)+'%'}</span></div>`;
+  })() : "";
+  const cust = (snap.customers || {})[branchCode] || {};
+  const clients = (cust.customers || []).slice().sort((x, y) => (y.revenue||0) - (x.revenue||0));
+  const ctot = clients.reduce((s, c) => s + (c.revenue || 0), 0);
+  const ser = cust.series || {};
+  const clientRows = clients.slice(0, 6).map(c => {
+    const tt = execTrend(ser[c.name]);
+    const trend = ser[c.name] ? `${execSparkline(ser[c.name], tt.color)}<span class="trend-tag" style="color:${tt.color};">${tt.tag}</span>` : "—";
+    return `<tr><td>${escapeHtml(c.name)}</td>${money(c.revenue)}<td style="text-align:right;">${ctot?(c.revenue/ctot*100).toFixed(1)+'%':'—'}</td><td style="text-align:center;white-space:nowrap;">${trend}</td></tr>`;
+  }).join("");
+  return `
+    <div style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin:14px 0;background:#f7f9fc;">
+      <div style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;font-weight:600;">Branch financials · ${escapeHtml(b.name || branchCode)} <span>${escapeHtml(branchCode)}</span> · actuals to ${escapeHtml((snap.meta||{}).month_label || "")}</div>
+      <div style="display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;margin-top:6px;">
+        <div><span style="font-size:22px;font-weight:800;color:var(--brand);letter-spacing:-0.02em;">${execFmtR(fy)}</span> <span style="font-size:12px;color:var(--muted);">revenue · rolling 12 m</span></div>
+        <div style="font-size:13px;">GP <strong>${gp!=null?gp.toFixed(0)+'%':'—'}</strong></div>
+        <div><span class="trend-tag" style="color:${t.color};">${t.tag}</span></div>
+      </div>
+      <h4 style="margin:12px 0 2px;font-size:13px;color:var(--brand);">Revenue by month (actual)</h4>
+      ${bmLineChart(sales, months, t.color)}
+      <h4 style="margin:12px 0 4px;font-size:13px;color:var(--brand);">Revenue by quarter</h4>
+      <div style="overflow-x:auto;"><table class="dt" style="margin:0;min-width:420px;"><thead><tr>${[0,1,2,3].map(qi=>`<th style="text-align:right;">${escapeHtml(qLabel(qi))}</th>`).join("")}<th style="text-align:right;">12 m</th></tr></thead><tbody><tr>${q.map(money).join("")}<td style="text-align:right;font-weight:700;">${execFmtR(fy)}</td></tr></tbody></table></div>
+      ${bvaRow}
+      ${clients.length ? `<h4 style="margin:14px 0 4px;font-size:13px;color:var(--brand);">Top clients — actual, rolling 12 m${Object.keys(ser).length?` <span style="color:var(--muted);font-weight:400;font-size:11px;">· trend ${escapeHtml(months[0]||"")}→${escapeHtml(months[months.length-1]||"")}</span>`:""}</h4>
+      <div style="overflow-x:auto;"><table class="dt" style="margin:0;min-width:480px;"><thead><tr><th>Client</th><th style="text-align:right;">Revenue</th><th style="text-align:right;">% of branch</th><th style="text-align:center;">Trend · 12 m</th></tr></thead><tbody>${clientRows}</tbody></table></div>` : ""}
+      <div style="font-size:11.5px;color:var(--muted);margin-top:8px;">Context for the <strong>Branch Profitability</strong> and <strong>Sales Performance</strong> ratings. You still assign the 1–10 scores.</div>
+    </div>`;
+}
 
 function renderBMCheckin(st) {
   const c = st.checkin;
@@ -5916,7 +6065,7 @@ function renderBMCheckin(st) {
       </span>
     </div>`;
 
-  document.getElementById("bm-checkin-body").innerHTML = head + secA + secB + secC + secD + actions;
+  document.getElementById("bm-checkin-body").innerHTML = head + renderBMActualsPanel(st.branchCode, st.snap, st.budget) + secA + secB + secC + secD + actions;
   if (!ro) {
     document.querySelectorAll("[data-bm-agreed]").forEach(s => s.addEventListener("change", bmRecomputeTotals));
   }
@@ -6203,6 +6352,7 @@ document.addEventListener("click", (e) => {
     case "self-save":    e.preventDefault(); bmSelfSave(false); break;
     case "self-submit":  e.preventDefault(); bmSelfSave(true); break;
     case "open-exec":    e.preventDefault(); openBMExecCheckin(d.emp, Number(d.year), Number(d.month), d.return || "appraiser"); break;
+    case "open-admin":   e.preventDefault(); openBMAdminCheckin(d.emp, Number(d.year), Number(d.month), d.return || "admin"); break;
     case "view":         e.preventDefault(); openBMViewCheckin(d.id, d.return || "admin"); break;
     case "tracker":      e.preventDefault(); showBMTracker(d.emp, Number(d.year) || bmNowYM().year, d.return || "appraiser"); break;
     case "guide":        e.preventDefault(); showBMGuide(d.return || "bm-self"); break;
