@@ -5933,9 +5933,16 @@ function renderBMActualsPanel(branchCode, snap, budget) {
   const months = (snap.meta && snap.meta.months) || [];
   const m = b.monthly || {}, r12 = b.r12 || {};
   const sales = (m.sales || []).map(x => +x || 0);
+  const gpArr = (m.gp || []).map(x => +x || 0);
+  const ebArr = (m.ebitda || []).map(x => +x || 0);
   const q = execQuarterSplit(sales);
+  const qGp = execQuarterSplit(gpArr);
+  const qEb = execQuarterSplit(ebArr);
   const fy = sales.reduce((s, x) => s + x, 0);
-  const gp = r12.sales ? (r12.gp / r12.sales * 100) : null;
+  const r12gp = (r12.gp != null) ? r12.gp : gpArr.reduce((s, x) => s + x, 0);
+  const r12eb = (r12.ebitda != null) ? r12.ebitda : ebArr.reduce((s, x) => s + x, 0);
+  const gp = r12.sales ? (r12.gp / r12.sales * 100) : (fy ? r12gp / fy * 100 : null);
+  const ebm = r12.sales ? (r12eb / r12.sales * 100) : (fy ? r12eb / fy * 100 : null);
   const t = execTrend(sales);
   const qLabel = qi => (months[qi*3] && months[qi*3+2]) ? `${months[qi*3].replace(/\s+\d+$/, "")}–${months[qi*3+2]}` : `Q${qi+1}`;
   const money = v => `<td style="text-align:right;">${execFmtR(v)}</td>`;
@@ -5958,17 +5965,22 @@ function renderBMActualsPanel(branchCode, snap, budget) {
       <div style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;font-weight:600;">Branch financials · ${escapeHtml(b.name || branchCode)} <span>${escapeHtml(branchCode)}</span> · actuals to ${escapeHtml((snap.meta||{}).month_label || "")}</div>
       <div style="display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;margin-top:6px;">
         <div><span style="font-size:22px;font-weight:800;color:var(--brand);letter-spacing:-0.02em;">${execFmtR(fy)}</span> <span style="font-size:12px;color:var(--muted);">revenue · rolling 12 m</span></div>
-        <div style="font-size:13px;">GP <strong>${gp!=null?gp.toFixed(0)+'%':'—'}</strong></div>
+        <div style="font-size:13px;">GP <strong>${execFmtR(r12gp)}</strong> <span style="color:var(--muted);">(${gp!=null?gp.toFixed(1)+'%':'—'})</span></div>
+        <div style="font-size:13px;">EBITDA <strong>${execFmtR(r12eb)}</strong> <span style="color:var(--muted);">(${ebm!=null?ebm.toFixed(1)+'%':'—'})</span></div>
         <div><span class="trend-tag" style="color:${t.color};">${t.tag}</span></div>
       </div>
       <h4 style="margin:12px 0 2px;font-size:13px;color:var(--brand);">Revenue by month (actual)</h4>
       ${bmLineChart(sales, months, t.color)}
-      <h4 style="margin:12px 0 4px;font-size:13px;color:var(--brand);">Revenue by quarter</h4>
-      <div style="overflow-x:auto;"><table class="dt" style="margin:0;min-width:420px;"><thead><tr>${[0,1,2,3].map(qi=>`<th style="text-align:right;">${escapeHtml(qLabel(qi))}</th>`).join("")}<th style="text-align:right;">12 m</th></tr></thead><tbody><tr>${q.map(money).join("")}<td style="text-align:right;font-weight:700;">${execFmtR(fy)}</td></tr></tbody></table></div>
+      <h4 style="margin:12px 0 4px;font-size:13px;color:var(--brand);">Revenue, GP &amp; EBITDA by quarter</h4>
+      <div style="overflow-x:auto;"><table class="dt" style="margin:0;min-width:460px;"><thead><tr><th>Measure</th>${[0,1,2,3].map(qi=>`<th style="text-align:right;">${escapeHtml(qLabel(qi))}</th>`).join("")}<th style="text-align:right;">12 m</th></tr></thead><tbody>
+        <tr><td>Revenue</td>${q.map(money).join("")}<td style="text-align:right;font-weight:700;">${execFmtR(fy)}</td></tr>
+        <tr><td>Gross profit</td>${qGp.map(money).join("")}<td style="text-align:right;font-weight:700;">${execFmtR(r12gp)}</td></tr>
+        <tr><td>EBITDA</td>${qEb.map(money).join("")}<td style="text-align:right;font-weight:700;">${execFmtR(r12eb)}</td></tr>
+      </tbody></table></div>
       ${bvaRow}
       ${clients.length ? `<h4 style="margin:14px 0 4px;font-size:13px;color:var(--brand);">Top clients — actual, rolling 12 m${Object.keys(ser).length?` <span style="color:var(--muted);font-weight:400;font-size:11px;">· trend ${escapeHtml(months[0]||"")}→${escapeHtml(months[months.length-1]||"")}</span>`:""}</h4>
       <div style="overflow-x:auto;"><table class="dt" style="margin:0;min-width:480px;"><thead><tr><th>Client</th><th style="text-align:right;">Revenue</th><th style="text-align:right;">% of branch</th><th style="text-align:center;">Trend · 12 m</th></tr></thead><tbody>${clientRows}</tbody></table></div>` : ""}
-      <div style="font-size:11.5px;color:var(--muted);margin-top:8px;">Context for the <strong>Branch Profitability</strong> and <strong>Sales Performance</strong> ratings. You still assign the 1–10 scores.</div>
+      <div style="font-size:11.5px;color:var(--muted);margin-top:8px;">EBITDA shown is branch EBITDA before head-office fees. Context for the <strong>Branch Profitability</strong> and <strong>Sales Performance</strong> ratings. You still assign the 1–10 scores.</div>
     </div>`;
 }
 
