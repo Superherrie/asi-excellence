@@ -6676,20 +6676,27 @@ function renderExecActualsPanel(st) {
   const qLabel = q => (months[q*3] && months[q*3+2]) ? `${months[q*3].replace(/\s+\d+$/, "")}–${months[q*3+2]}` : `Q${q+1}`;
   const codes = st.ccs.filter(c => snap.branches[c]);
   const bname = c => (snap.branches[c] && snap.branches[c].name) || c;
-  const qrev = {}, fy = {}, gp = {};
+  const qrev = {}, fy = {}, gp = {}, gpR = {}, ebR = {}, em = {};
   codes.forEach(c => {
     const m = snap.branches[c].monthly || {}, r12 = snap.branches[c].r12 || {};
     qrev[c] = execQuarterSplit(m.sales);
     fy[c] = (m.sales || []).reduce((s, x) => s + (x || 0), 0);
     gp[c] = r12.sales ? (r12.gp / r12.sales * 100) : null;
+    gpR[c] = (r12.gp != null) ? r12.gp : null;
+    ebR[c] = (r12.ebitda != null) ? r12.ebitda : null;
+    em[c] = r12.sales ? (r12.ebitda / r12.sales * 100) : null;
   });
   const totQ = [0,1,2,3].map(q => codes.reduce((s, c) => s + qrev[c][q], 0));
   const totFy = codes.reduce((s, c) => s + fy[c], 0);
+  const totGpR = codes.reduce((s, c) => s + (gpR[c] || 0), 0);
+  const totEbR = codes.reduce((s, c) => s + (ebR[c] || 0), 0);
+  const totGpPct = totFy ? totGpR / totFy * 100 : null;
+  const totEbPct = totFy ? totEbR / totFy * 100 : null;
   const bud = st.budget || {};
   const money = v => `<td style="text-align:right;">${execFmtR(v)}</td>`;
   // Revenue by branch x last 4 quarters
-  let revRows = codes.map(c => `<tr><td>${escapeHtml(bname(c))} <span style="color:var(--muted);font-size:11px;">${escapeHtml(c)}</span></td>${qrev[c].map(money).join("")}<td style="text-align:right;font-weight:700;">${execFmtR(fy[c])}</td><td style="text-align:right;">${gp[c]!=null?gp[c].toFixed(0)+"%":"—"}</td></tr>`).join("");
-  revRows += `<tr style="border-top:2px solid var(--border);font-weight:700;"><td>Total · ${escapeHtml(execVertical(st.type, st.ccs))}</td>${totQ.map(money).join("")}<td style="text-align:right;">${execFmtR(totFy)}</td><td></td></tr>`;
+  let revRows = codes.map(c => `<tr><td>${escapeHtml(bname(c))} <span style="color:var(--muted);font-size:11px;">${escapeHtml(c)}</span></td>${qrev[c].map(money).join("")}<td style="text-align:right;font-weight:700;">${execFmtR(fy[c])}</td></tr>`).join("");
+  revRows += `<tr style="border-top:2px solid var(--border);font-weight:700;"><td>Total · ${escapeHtml(execVertical(st.type, st.ccs))}</td>${totQ.map(money).join("")}<td style="text-align:right;">${execFmtR(totFy)}</td></tr>`;
   // FY27 budget vs actual — Q1 (Jul-Sep 26) = actual quarter idx 3
   const bvaRows = codes.map(c => {
     const a = qrev[c][3], b = (bud[c]||[0])[0], v = b ? ((a-b)/Math.abs(b)*100) : null;
@@ -6726,7 +6733,10 @@ function renderExecActualsPanel(st) {
     <div style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin:12px 0;background:#f7f9fc;">
       <div style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;font-weight:600;">Financial results · ${escapeHtml(execVertical(st.type, st.ccs))} · actuals to ${escapeHtml((snap.meta||{}).month_label || "")}</div>
       <h4 style="margin:12px 0 4px;font-size:13px;color:var(--brand);">Revenue by branch — last 4 quarters (actual)</h4>
-      <div style="overflow-x:auto;"><table class="dt" style="margin:0;min-width:580px;"><thead><tr><th>Branch</th>${[0,1,2,3].map(q=>`<th style="text-align:right;">${escapeHtml(qLabel(q))}</th>`).join("")}<th style="text-align:right;">12 m</th><th style="text-align:right;">GP%</th></tr></thead><tbody>${revRows}</tbody></table></div>
+      <div style="overflow-x:auto;"><table class="dt" style="margin:0;min-width:540px;"><thead><tr><th>Branch</th>${[0,1,2,3].map(q=>`<th style="text-align:right;">${escapeHtml(qLabel(q))}</th>`).join("")}<th style="text-align:right;">12 m</th></tr></thead><tbody>${revRows}</tbody></table></div>
+      <h4 style="margin:16px 0 4px;font-size:13px;color:var(--brand);">Gross profit &amp; EBITDA by branch — rolling 12 m (actual)</h4>
+      <div style="overflow-x:auto;"><table class="dt" style="margin:0;min-width:540px;"><thead><tr><th>Branch</th><th style="text-align:right;">Revenue</th><th style="text-align:right;">GP</th><th style="text-align:right;">GP%</th><th style="text-align:right;">EBITDA</th><th style="text-align:right;">EBITDA%</th></tr></thead><tbody>${codes.map(c=>`<tr><td>${escapeHtml(bname(c))} <span style="color:var(--muted);font-size:11px;">${escapeHtml(c)}</span></td>${money(fy[c])}${money(gpR[c])}<td style="text-align:right;">${gp[c]!=null?gp[c].toFixed(0)+'%':'—'}</td>${money(ebR[c])}<td style="text-align:right;">${em[c]!=null?em[c].toFixed(0)+'%':'—'}</td></tr>`).join("")}<tr style="border-top:2px solid var(--border);font-weight:700;"><td>Total · ${escapeHtml(execVertical(st.type, st.ccs))}</td>${money(totFy)}${money(totGpR)}<td style="text-align:right;">${totGpPct!=null?totGpPct.toFixed(0)+'%':'—'}</td>${money(totEbR)}<td style="text-align:right;">${totEbPct!=null?totEbPct.toFixed(0)+'%':'—'}</td></tr></tbody></table></div>
+      <div style="font-size:11.5px;color:var(--muted);margin-top:4px;">EBITDA is branch EBITDA before head-office fees.</div>
       <h4 style="margin:16px 0 4px;font-size:13px;color:var(--brand);">FY27 budget vs actual — Q1 (Jul–Sep 26)<span style="color:var(--muted);font-weight:400;font-size:11px;"> · the one quarter with both so far; fills as the year loads</span></h4>
       <div style="overflow-x:auto;"><table class="dt" style="margin:0;min-width:440px;"><thead><tr><th>Branch</th><th style="text-align:right;">Budget</th><th style="text-align:right;">Actual</th><th style="text-align:right;">Var</th></tr></thead><tbody>${bvaRows}<tr style="border-top:2px solid var(--border);font-weight:700;"><td>Total</td>${money(budTot)}${money(totQ[3])}<td style="text-align:right;color:${totVar>=0?'#12b76a':'#f04438'};">${totVar==null?'—':(totVar>=0?'+':'')+totVar.toFixed(0)+'%'}</td></tr></tbody></table></div>
       <div style="font-size:11.5px;color:var(--muted);margin-top:4px;">Full FY27 revenue budget (target) for this vertical: ${execFmtR(budFyTot)}.</div>
