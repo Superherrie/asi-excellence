@@ -547,6 +547,18 @@ values ('your.email@asi.co.za', 'Your Name', 'admin');</pre>
       </div>
 
       <div class="tab-panel active" id="tab-admin-appraisals">
+        <h3 style="margin:4px 0 10px;font-size:14px;color:var(--brand);">Do an appraisal</h3>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:22px;">
+          <button class="capture-card" id="btn-admin-capture-pto">
+            <h3>Capture PTO Observation</h3>
+            <p>Observe any staff member on the job and rate them against their role's competencies. Creates their appraisal for the active period if one doesn't exist yet.</p>
+          </button>
+          <button class="capture-card" id="btn-admin-capture-erp">
+            <h3>Enter Acumatica / ERP Score</h3>
+            <p>Enter the ERP-generated score for any staff member for this period. One score per employee per period.</p>
+          </button>
+        </div>
+        <h3 style="margin:4px 0 10px;font-size:14px;color:var(--brand);">All appraisals</h3>
         <div id="admin-appraisals-list"></div>
       </div>
 
@@ -4217,6 +4229,9 @@ async function loadAppraiserMyActivity() {
 
 document.getElementById("btn-go-capture-pto").addEventListener("click", () => showCapturePTO());
 document.getElementById("btn-go-capture-erp").addEventListener("click", () => showCaptureERP());
+// Admin can also run the capture flow (do an appraisal from scratch) for any staff member.
+document.getElementById("btn-admin-capture-pto").addEventListener("click", () => showCapturePTO());
+document.getElementById("btn-admin-capture-erp").addEventListener("click", () => showCaptureERP());
 
 /* ---- PTO observation capture ---- */
 async function showCapturePTO() {
