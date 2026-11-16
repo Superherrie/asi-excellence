@@ -27,6 +27,7 @@ jobs:
           mkdir -p _site/brand
           cp index.html config.js asi-connect-logo.png _site/
           cp brand/logo_white.png brand/spiral.png brand/wave.png _site/brand/
+          cp CNAME _site/        # custom domain: excellence.asiconnect.co.za
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
