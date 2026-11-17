@@ -849,11 +849,13 @@ values ('your.email@asi.co.za', 'Your Name', 'admin');</pre>
       <div id="bm-self-banner"></div>
       <div class="tabs">
         <button class="tab-btn active" data-tab="bm-self-current">Current Month</button>
+        <button class="tab-btn" data-tab="bm-self-team">Branch Team</button>
         <button class="tab-btn" data-tab="bm-self-tracker">Annual Tracker</button>
         <button class="tab-btn" data-tab="bm-self-history">History</button>
         <button class="tab-btn" data-tab="bm-self-guide">Rating Guide</button>
       </div>
       <div class="tab-panel active" id="tab-bm-self-current"><div id="bm-self-current"><div class="loader"></div></div></div>
+      <div class="tab-panel" id="tab-bm-self-team"><div id="bm-self-team"></div></div>
       <div class="tab-panel" id="tab-bm-self-tracker"><div id="bm-self-tracker"></div></div>
       <div class="tab-panel" id="tab-bm-self-history"><div id="bm-self-history"></div></div>
       <div class="tab-panel" id="tab-bm-self-guide"><div id="bm-self-guide"></div></div>
@@ -5539,6 +5541,60 @@ async function showBMSelf() {
   loadBMSelfCurrent();
   renderRatingGuideInto(document.getElementById("bm-self-guide"));
   loadBMSelfHistory();
+  loadBMBranchTeam(me && me.branch_code);
+}
+
+// Branch Team roster: a branch manager sees every employee in their branch and
+// can reassign each person's reviewer (appraiser). The write goes through the
+// bm_set_reviewer RPC, which only touches appraiser_id for their own branch.
+async function loadBMBranchTeam(branchCode) {
+  const el = document.getElementById("bm-self-team");
+  if (!el) return;
+  if (!branchCode) {
+    el.innerHTML = '<div class="notice warn">Your branch isn’t set yet — ask your admin to set it before your team shows here.</div>';
+    return;
+  }
+  el.innerHTML = '<div class="loader"></div>';
+  try {
+    const { data: team, error } = await sb.from("profiles")
+      .select("id, name, job_role, appraiser_id")
+      .eq("branch_code", branchCode)
+      .neq("id", profile.id)
+      .neq("job_role", "branch_manager")
+      .order("name");
+    if (error) throw error;
+    if (!team || !team.length) {
+      el.innerHTML = `<div class="empty-state">No employees found in your branch (${escapeHtml(branchCode)}).</div>`;
+      return;
+    }
+    // Reviewer candidates = you + everyone in the branch (pick a team leader, etc.)
+    const candidates = [{ id: profile.id, name: profile.name + " (you)" }]
+      .concat(team.map(t => ({ id: t.id, name: t.name })));
+    const optsFor = cur => '<option value="">— unassigned —</option>' +
+      candidates.map(c => `<option value="${c.id}" ${c.id === cur ? "selected" : ""}>${escapeHtml(c.name)}</option>`).join("");
+    const rows = team.map(t => `
+      <tr>
+        <td>${escapeHtml(t.name)}</td>
+        <td style="color:var(--muted);">${escapeHtml(getRoleLabel(t.job_role))}</td>
+        <td><select data-bm-reviewer="${t.id}" style="font-size:13px;padding:4px 6px;max-width:230px;">${optsFor(t.appraiser_id)}</select></td>
+      </tr>`).join("");
+    el.innerHTML = `
+      <p class="help">Everyone in your branch (<strong>${escapeHtml(branchCode)}</strong>). The <strong>reviewer</strong> is who captures each person’s PTO observations and ratings — set a team leader or keep yourself. Changes save immediately.</p>
+      <div id="bm-team-msg"></div>
+      <div style="overflow-x:auto;"><table class="dt" style="min-width:520px;"><thead><tr><th>Employee</th><th>Role</th><th>Reviewer</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    el.querySelectorAll("[data-bm-reviewer]").forEach(sel => {
+      sel.addEventListener("change", async e => {
+        const empId = e.target.getAttribute("data-bm-reviewer");
+        const reviewerId = e.target.value || null;
+        e.target.disabled = true;
+        const { error: rpcErr } = await sb.rpc("bm_set_reviewer", { p_employee: empId, p_reviewer: reviewerId });
+        e.target.disabled = false;
+        setMessage("bm-team-msg", rpcErr ? ("Could not update reviewer: " + rpcErr.message) : "Reviewer updated.", rpcErr ? "error" : "ok");
+      });
+    });
+  } catch (err) {
+    el.innerHTML = `<div class="notice error">Could not load your branch team: ${escapeHtml(err.message || String(err))}</div>`;
+  }
 }
 
 function bmMonthPicker(id, y, m) {
