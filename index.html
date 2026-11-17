@@ -565,6 +565,7 @@ values ('your.email@asi.co.za', 'Your Name', 'admin');</pre>
       <div class="tab-panel" id="tab-admin-checkins">
         <p class="help">Open or start any Branch Manager's monthly check-in, and set each manager's branch so their revenue metrics show on the sheet. Captured check-ins are listed below.</p>
         <div id="admin-checkins-list"></div>
+        <div id="admin-sales-checkins-list"></div>
       </div>
 
       <div class="tab-panel" id="tab-admin-exec">
@@ -845,7 +846,7 @@ values ('your.email@asi.co.za', 'Your Name', 'admin');</pre>
   <!-- ================ BM: MY MONTHLY CHECK-IN (BRANCH MANAGER) ================ -->
   <section id="screen-bm-self" hidden>
     <div class="card">
-      <h2>My Monthly Check-In</h2>
+      <h2 id="bm-self-heading">My Monthly Check-In</h2>
       <div id="bm-self-banner"></div>
       <div class="tabs">
         <button class="tab-btn active" data-tab="bm-self-current">Current Month</button>
@@ -2024,11 +2025,11 @@ function routeForRole() {
   // Until they pick a mode, show the picker.
   if (profile.app_role === "appraiser") {
     if (currentMode === "appraiser") return showAppraiser();
-    if (currentMode === "employee")  return (profile.job_role === "branch_manager" ? showBMSelf() : showEmployee());
+    if (currentMode === "employee")  return (trackForJobRole(profile.job_role) ? showBMSelf() : showEmployee());
     return showScreen("mode-picker");
   }
   // Branch Managers use the monthly check-in track instead of the PTO/quiz flow.
-  if (profile.app_role === "employee")  return (profile.job_role === "branch_manager" ? showBMSelf() : showEmployee());
+  if (profile.app_role === "employee")  return (trackForJobRole(profile.job_role) ? showBMSelf() : showEmployee());
   showScreen("auth");
 }
 
@@ -5434,16 +5435,62 @@ const BM_RATING_SCALE = [
 ];
 const BM_STATUS_LABEL = { draft: "Draft", self_submitted: "Self-assessed", agreed: "Rated", signed_off: "Signed off" };
 
-let bmKras = [];                 // cached reference KRAs
-let bmCheckinState = null;       // { checkin, kras, goals, prevGoals, prevCheckin, empName, execName, mode, returnTo }
-let bmSelfYM = null;             // { year, month } currently shown on the BM self screen
-let bmSelfAppraiserId = null;    // the BM's assigned Regional Executive
+let bmKras = [];                 // KRAs for the track currently in view
+let bmKrasByTrack = {};          // per-track cache of active KRAs
+let bmTrack = "branch_manager";  // the check-in track currently being shown
+let bmCheckinState = null;       // { checkin, kras, goals, prevGoals, prevCheckin, empName, execName, mode, returnTo, track }
+let bmSelfYM = null;             // { year, month } currently shown on the self screen
+let bmSelfAppraiserId = null;    // the person's assigned reviewer
 
-async function loadBmKras() {
-  if (bmKras.length) return bmKras;
-  const { data, error } = await sb.from("bm_kras").select("*").eq("active", true).order("sort_order");
-  if (error) { console.error("[bm_kras]", error); return bmKras; }
-  bmKras = data || [];
+// Check-in tracks that reuse this weighted-KRA engine. 'branch_manager' is the
+// original; 'sales' reuses the same machinery with its own KPI set + labels.
+const CHECKIN_TRACKS = {
+  branch_manager: {
+    roles: ["branch_manager"],
+    reviewerLabel: "Regional Executive",
+    selfTitle: "monthly check-in with your Regional Executive",
+    sheetTitle: "Monthly Check-In",
+    subjectLabel: "Branch Manager",
+    showBranchPanel: true,
+    prework: [
+      ["financials", "Branch financials (net profit & GP% vs budget, variances)"],
+      ["dashboards", "Acumatica dashboards (sales / pipeline, compliance, stores)"],
+      ["compliance", "Safety file & training matrix status; access-to-site notes"],
+      ["people",     "People update (IR matters, active PIPs, development/training)"],
+    ],
+  },
+  sales: {
+    roles: ["sales_representative", "key_account_manager", "national_key_accounts_manager", "business_developer"],
+    reviewerLabel: "reviewer",
+    selfTitle: "sales performance check-in with your reviewer",
+    sheetTitle: "Sales Performance Check-In",
+    subjectLabel: "Salesperson",
+    showBranchPanel: false,
+    prework: [
+      ["gp",       "GP vs quarterly target — your GP and the target-letter number"],
+      ["pipeline", "Pipeline & forecast (ASI Sales Forecast dashboard)"],
+      ["quotes",   "Quotes issued vs won this period, and open-quote follow-ups"],
+      ["debtors",  "Debtors on your accounts — overdue balances and actions"],
+    ],
+  },
+};
+const SALES_ROLES = CHECKIN_TRACKS.sales.roles;
+function trackForJobRole(role) {
+  for (const [t, cfg] of Object.entries(CHECKIN_TRACKS)) if (cfg.roles.includes(role)) return t;
+  return null;
+}
+function bmCfg() { return CHECKIN_TRACKS[bmTrack] || CHECKIN_TRACKS.branch_manager; }
+
+// Load (and cache) the active KRAs for a track; sets bmTrack + bmKras to it.
+async function loadBmKras(track) {
+  track = track || bmTrack || "branch_manager";
+  bmTrack = track;
+  if (!bmKrasByTrack[track]) {
+    const { data, error } = await sb.from("bm_kras").select("*").eq("active", true).eq("track", track).order("sort_order");
+    if (error) { console.error("[bm_kras]", error); return (bmKras = []); }
+    bmKrasByTrack[track] = data || [];
+  }
+  bmKras = bmKrasByTrack[track];
   return bmKras;
 }
 
@@ -5492,7 +5539,7 @@ async function bmGetOrCreateCheckin(employeeId, appraiserId, year, month) {
   const existing = await bmGetCheckin(employeeId, year, month);
   if (existing) return existing;
   const { data, error } = await sb.from("bm_checkins")
-    .insert({ employee_id: employeeId, appraiser_id: appraiserId, period_year: year, period_month: month })
+    .insert({ employee_id: employeeId, appraiser_id: appraiserId, period_year: year, period_month: month, track: bmTrack })
     .select().single();
   if (error) throw error;
   return data;
@@ -5532,16 +5579,22 @@ async function bmResolveAppraiser(branchCode, fallbackId) {
 async function showBMSelf() {
   showScreen("bm-self");
   switchTab("bm-self-current");
-  await loadBmKras();
+  bmTrack = trackForJobRole(profile.job_role) || "branch_manager";
+  await loadBmKras(bmTrack);
+  const cfg = bmCfg();
+  const heading = document.getElementById("bm-self-heading");
+  if (heading) heading.textContent = bmTrack === "branch_manager" ? "My Monthly Check-In" : "My " + cfg.sheetTitle;
   const banner = document.getElementById("bm-self-banner");
-  banner.innerHTML = `<div class="notice info"><strong>${escapeHtml(getRoleLabel(profile.job_role))}</strong> — monthly check-in with your Regional Executive.</div>`;
+  banner.innerHTML = `<div class="notice info"><strong>${escapeHtml(getRoleLabel(profile.job_role))}</strong> — ${escapeHtml(cfg.selfTitle)}.</div>`;
   const { data: me } = await sb.from("profiles").select("appraiser_id, branch_code").eq("id", profile.id).maybeSingle();
-  bmSelfAppraiserId = await bmResolveAppraiser(me && me.branch_code, me && me.appraiser_id);
+  bmSelfAppraiserId = await bmResolveAppraiser(bmTrack === "branch_manager" ? (me && me.branch_code) : null, me && me.appraiser_id);
   if (!bmSelfYM) bmSelfYM = bmNowYM();
+  const teamTab = document.querySelector('[data-tab="bm-self-team"]');
+  if (teamTab) teamTab.style.display = (bmTrack === "branch_manager") ? "" : "none";
   loadBMSelfCurrent();
   renderRatingGuideInto(document.getElementById("bm-self-guide"));
   loadBMSelfHistory();
-  loadBMBranchTeam(me && me.branch_code);
+  if (bmTrack === "branch_manager") loadBMBranchTeam(me && me.branch_code);
 }
 
 // Branch Team roster: a branch manager sees every employee in their branch and
@@ -5623,6 +5676,7 @@ async function loadBMSelfCurrent() {
 }
 
 function renderBMSelfCurrent(wrap, checkin, prevGoals, year, month) {
+  const cfg = bmCfg();
   const locked = checkin && (checkin.status === "agreed" || checkin.status === "signed_off");
   const self = (checkin && checkin.self_ratings) || {};
   const agreed = (checkin && checkin.agreed_ratings) || {};
@@ -5660,7 +5714,7 @@ function renderBMSelfCurrent(wrap, checkin, prevGoals, year, month) {
     const pct = checkin.equivalent_pct;
     const band = bmBand(pct);
     wrap.innerHTML = header + secA + `
-      <h3 style="margin:22px 0 6px; font-size:14px; color:var(--brand);">Your scorecard (agreed with your Executive)</h3>
+      <h3 style="margin:22px 0 6px; font-size:14px; color:var(--brand);">Your scorecard (agreed with your ${escapeHtml(cfg.reviewerLabel)})</h3>
       <table class="dt"><thead><tr><th>Area</th><th>Weight</th><th>Self</th><th>Agreed</th><th>Evidence</th></tr></thead><tbody>
         ${bmKras.map(k => `<tr>
           <td>${escapeHtml(k.label)}</td>
@@ -5685,7 +5739,7 @@ function renderBMSelfCurrent(wrap, checkin, prevGoals, year, month) {
   const canEdit = !bmSelfAppraiserId ? false : true;
   const secB = `
     <h3 style="margin:22px 0 6px; font-size:14px; color:var(--brand);">Your self-assessment</h3>
-    <p class="help">Rate yourself 1–10 on each area before your check-in. Your Executive sees these and agrees a final rating with you. Expand each area for the 5-vs-8 guide.</p>
+    <p class="help">Rate yourself 1–10 on each area before your check-in. Your ${escapeHtml(cfg.reviewerLabel)} sees these and agrees a final rating with you. Expand each area for the 5-vs-8 guide.</p>
     ${bmKras.map(k => `
       <div style="border:1px solid var(--border); border-radius:8px; padding:12px 14px; margin-bottom:10px;">
         <div style="display:flex; justify-content:space-between; gap:12px; align-items:center;">
@@ -5698,12 +5752,7 @@ function renderBMSelfCurrent(wrap, checkin, prevGoals, year, month) {
         </details>
       </div>`).join("")}`;
 
-  const preworkFields = [
-    ["financials", "Branch financials (net profit & GP% vs budget, variances)"],
-    ["dashboards", "Acumatica dashboards (sales / pipeline, compliance, stores)"],
-    ["compliance", "Safety file & training matrix status; access-to-site notes"],
-    ["people",     "People update (IR matters, active PIPs, development/training)"],
-  ];
+  const preworkFields = cfg.prework;
   const secPrework = `
     <h3 style="margin:22px 0 6px; font-size:14px; color:var(--brand);">Pre-work pack</h3>
     <p class="help">Bring the evidence so the meeting is spent on coaching, not data-gathering.</p>
@@ -5717,9 +5766,9 @@ function renderBMSelfCurrent(wrap, checkin, prevGoals, year, month) {
     <div id="bm-self-msg"></div>
     <div class="button-row">
       <button class="secondary" data-bm="self-save">Save draft</button>
-      <button class="primary" data-bm="self-submit">Submit to Executive</button>
+      <button class="primary" data-bm="self-submit">Submit to ${escapeHtml(cfg.reviewerLabel)}</button>
     </div>
-    ${!bmSelfAppraiserId ? `<div class="notice warn" style="margin-top:10px;">You don't have a Regional Executive assigned yet. Ask your admin to set your appraiser on the Users tab before submitting.</div>` : ""}`;
+    ${!bmSelfAppraiserId ? `<div class="notice warn" style="margin-top:10px;">You don't have a ${escapeHtml(cfg.reviewerLabel)} assigned yet. Ask your admin to set your reviewer before submitting.</div>` : ""}`;
   bmBindSelfMonth();
 }
 
@@ -5734,7 +5783,7 @@ function bmBindSelfMonth() {
 }
 
 async function bmSelfSave(submit) {
-  if (!bmSelfAppraiserId) { setMessage("bm-self-msg", "No Regional Executive assigned to your account yet.", "error"); return; }
+  if (!bmSelfAppraiserId) { setMessage("bm-self-msg", "No " + bmCfg().reviewerLabel + " assigned to your account yet.", "error"); return; }
   const { year, month } = bmSelfYM;
   const self = {};
   bmKras.forEach(k => {
@@ -5744,7 +5793,7 @@ async function bmSelfSave(submit) {
   const prework = {};
   document.querySelectorAll("[data-bm-pw]").forEach(el => { prework[el.getAttribute("data-bm-pw")] = el.value.trim(); });
   if (submit && bmKras.some(k => self[k.kra_key] == null)) {
-    setMessage("bm-self-msg", "Please rate all six areas before submitting.", "error"); return;
+    setMessage("bm-self-msg", "Please rate all areas before submitting.", "error"); return;
   }
   setMessage("bm-self-msg", "Saving…", "info");
   try {
@@ -5755,7 +5804,7 @@ async function bmSelfSave(submit) {
       .update({ self_ratings: self, prework: Object.assign({}, existingPw, prework), status })
       .eq("id", checkin.id);
     if (error) throw error;
-    setMessage("bm-self-msg", submit ? "Submitted to your Executive." : "Draft saved.", "ok");
+    setMessage("bm-self-msg", submit ? ("Submitted to your " + bmCfg().reviewerLabel + ".") : "Draft saved.", "ok");
     loadBMSelfCurrent();
   } catch (err) {
     setMessage("bm-self-msg", "Save failed: " + (err.message || String(err)), "error");
@@ -5793,7 +5842,7 @@ async function loadAppraiserCheckins() {
   if (!target) return;
   target.innerHTML = '<div class="loader"></div>';
   try {
-    await loadBmKras();
+    await loadBmKras("branch_manager");
     const { data: bms, error } = await sb.from("profiles")
       .select("id, name, job_role").eq("appraiser_id", profile.id).eq("job_role", "branch_manager").order("name");
     if (error) throw error;
@@ -5838,7 +5887,7 @@ async function loadAdminCheckins() {
   if (!target) return;
   target.innerHTML = '<div class="loader"></div>';
   try {
-    await loadBmKras();
+    await loadBmKras("branch_manager");
     // roster of every Branch Manager (admin can open/start any of them)
     const { data: bms, error } = await sb.from("profiles")
       .select("id, name, appraiser_id, branch_code").eq("job_role", "branch_manager").order("name");
@@ -5902,9 +5951,52 @@ async function loadAdminCheckins() {
         if (upErr) alert("Could not set branch: " + upErr.message);
       });
     });
+    loadAdminSalesCheckins();
   } catch (err) {
     console.error("[admin checkins]", err);
     target.innerHTML = `<div class="notice error">Could not load check-ins: ${escapeHtml(err.message || String(err))}</div>`;
+  }
+}
+
+// Admin roster for the Sales performance check-in track (reuses the same engine).
+async function loadAdminSalesCheckins() {
+  const target = document.getElementById("admin-sales-checkins-list");
+  if (!target) return;
+  target.innerHTML = '<div class="loader"></div>';
+  try {
+    await loadBmKras("sales");
+    const { data: staff, error } = await sb.from("profiles")
+      .select("id, name, job_role, appraiser_id").in("job_role", SALES_ROLES).order("name");
+    if (error) throw error;
+    if (!staff || !staff.length) {
+      target.innerHTML = '<h4 style="margin:22px 0 6px;font-size:14px;color:var(--brand);">Sales performance check-ins</h4><div class="empty-state">No sales staff found.</div>';
+      return;
+    }
+    const apprIds = [...new Set(staff.map(s => s.appraiser_id).filter(Boolean))];
+    let apprName = {};
+    if (apprIds.length) { const { data: ap } = await sb.from("profiles").select("id, name").in("id", apprIds); apprName = Object.fromEntries((ap || []).map(a => [a.id, a.name])); }
+    const { year, month } = bmNowYM();
+    const ids = staff.map(s => s.id);
+    let byEmp = {};
+    if (ids.length) { const { data: cks } = await sb.from("bm_checkins").select("*").in("employee_id", ids).eq("period_year", year).eq("period_month", month); byEmp = Object.fromEntries((cks || []).map(c => [c.employee_id, c])); }
+    const rows = staff.map(s => {
+      const c = byEmp[s.id];
+      return `<tr>
+        <td><strong>${escapeHtml(s.name)}</strong></td>
+        <td style="color:var(--muted);">${escapeHtml(getRoleLabel(s.job_role))}</td>
+        <td>${escapeHtml(s.appraiser_id ? (apprName[s.appraiser_id] || "—") : "—")}</td>
+        <td>${c ? escapeHtml(BM_STATUS_LABEL[c.status] || c.status) : "Not started"}</td>
+        <td>${c && c.weighted_score != null ? c.weighted_score.toFixed(2) + " / 10" : "—"}</td>
+        <td style="white-space:nowrap;"><button class="primary small" data-bm="open-admin" data-emp="${s.id}" data-year="${year}" data-month="${month}" data-return="admin">${c ? "Open" : "Start"}</button></td>
+      </tr>`;
+    }).join("");
+    target.innerHTML = `
+      <h4 style="margin:22px 0 6px;font-size:14px;color:var(--brand);">Sales performance check-ins</h4>
+      <div class="notice info"><strong>This month:</strong> ${escapeHtml(bmMonthLabel(year, month))} — open or start any salesperson's KPI check-in. Set their reviewer on the Users tab.</div>
+      <table class="dt"><thead><tr><th>Salesperson</th><th>Role</th><th>Reviewer</th><th>Status</th><th>Score</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+  } catch (err) {
+    console.error("[admin sales checkins]", err);
+    target.innerHTML = `<div class="notice error">Could not load sales check-ins: ${escapeHtml(err.message || String(err))}</div>`;
   }
 }
 
@@ -5914,7 +6006,8 @@ async function openBMExecCheckin(employeeId, year, month, returnTo) {
   const body = document.getElementById("bm-checkin-body");
   body.innerHTML = '<div class="loader"></div>';
   try {
-    await loadBmKras();
+    const { data: emp } = await sb.from("profiles").select("job_role").eq("id", employeeId).maybeSingle();
+    await loadBmKras(trackForJobRole(emp && emp.job_role) || "branch_manager");
     const checkin = await bmGetOrCreateCheckin(employeeId, profile.id, year, month);
     await bmRenderCheckinById(checkin.id, "exec", returnTo);
   } catch (err) {
@@ -5934,9 +6027,10 @@ async function openBMAdminCheckin(employeeId, year, month, returnTo) {
   const body = document.getElementById("bm-checkin-body");
   body.innerHTML = '<div class="loader"></div>';
   try {
-    await loadBmKras();
-    const { data: emp } = await sb.from("profiles").select("appraiser_id, branch_code").eq("id", employeeId).maybeSingle();
-    const appraiserId = await bmResolveAppraiser(emp && emp.branch_code, (emp && emp.appraiser_id) || profile.id);
+    const { data: emp } = await sb.from("profiles").select("appraiser_id, branch_code, job_role").eq("id", employeeId).maybeSingle();
+    const track = trackForJobRole(emp && emp.job_role) || "branch_manager";
+    await loadBmKras(track);
+    const appraiserId = await bmResolveAppraiser(track === "branch_manager" ? (emp && emp.branch_code) : null, (emp && emp.appraiser_id) || profile.id);
     const checkin = await bmGetOrCreateCheckin(employeeId, appraiserId, year, month);
     await bmRenderCheckinById(checkin.id, "exec", returnTo);
   } catch (err) {
@@ -5948,20 +6042,21 @@ async function bmRenderCheckinById(checkinId, mode, returnTo) {
   try {
     const { data: c, error } = await sb.from("bm_checkins").select("*").eq("id", checkinId).single();
     if (error) throw error;
-    const kras = await loadBmKras();
     const goals = await bmLoadGoals(c.id);
     const { prev, goals: prevGoals } = await bmLoadReviewGoals(c.employee_id, c.period_year, c.period_month);
-    const { data: emp } = await sb.from("profiles").select("name, branch_code").eq("id", c.employee_id).maybeSingle();
+    const { data: emp } = await sb.from("profiles").select("name, branch_code, job_role").eq("id", c.employee_id).maybeSingle();
+    const track = c.track || trackForJobRole(emp && emp.job_role) || "branch_manager";
+    const kras = await loadBmKras(track);
     const empName = emp ? emp.name : await bmProfileName(c.employee_id);
     const execName = c.appraiser_id ? await bmProfileName(c.appraiser_id) : (mode === "exec" ? profile.name : "—");
-    // branch financials (same source as the exec panel), scoped to this BM's branch
-    const branchCode = emp ? emp.branch_code : null;
+    // branch financials panel only applies to the branch-manager track
+    const branchCode = (track === "branch_manager" && emp) ? emp.branch_code : null;
     let snap = null, budget = {};
     if (branchCode) {
       snap = await loadFinSnapshot();
       budget = await loadExecBudget([branchCode]);
     }
-    bmCheckinState = { checkin: c, kras, goals, prevGoals, prevCheckin: prev, empName, execName, mode, returnTo, branchCode, snap, budget };
+    bmCheckinState = { checkin: c, kras, goals, prevGoals, prevCheckin: prev, empName, execName, mode, returnTo, branchCode, snap, budget, track };
     renderBMCheckin(bmCheckinState);
   } catch (err) {
     body.innerHTML = `<div class="notice error">Could not load check-in: ${escapeHtml(err.message || String(err))}</div>`;
@@ -6057,6 +6152,7 @@ function renderBMActualsPanel(branchCode, snap, budget) {
 
 function renderBMCheckin(st) {
   const c = st.checkin;
+  const cfg = CHECKIN_TRACKS[st.track] || CHECKIN_TRACKS.branch_manager;
   const ro = st.mode === "view" || c.status === "signed_off";
   const dis = ro ? "disabled" : "";
   const self = c.self_ratings || {};
@@ -6068,10 +6164,10 @@ function renderBMCheckin(st) {
     <div class="button-row" style="justify-content:flex-start;">
       <button class="secondary small" data-bm="back" data-return="${escapeHtml(st.returnTo)}">← Back</button>
     </div>
-    <h2 style="margin-top:8px;">Monthly Check-In — ${escapeHtml(st.empName)}</h2>
+    <h2 style="margin-top:8px;">${escapeHtml(cfg.sheetTitle)} — ${escapeHtml(st.empName)}</h2>
     <div class="field-row">
-      <div class="field"><label>Branch Manager</label><input value="${escapeHtml(st.empName)}" disabled></div>
-      <div class="field"><label>Regional Executive</label><input value="${escapeHtml(st.execName)}" disabled></div>
+      <div class="field"><label>${escapeHtml(cfg.subjectLabel)}</label><input value="${escapeHtml(st.empName)}" disabled></div>
+      <div class="field"><label>${escapeHtml(cfg.reviewerLabel)}</label><input value="${escapeHtml(st.execName)}" disabled></div>
     </div>
     <div class="field-row">
       <div class="field"><label>Month</label><input value="${escapeHtml(bmMonthLabel(c.period_year, c.period_month))}" disabled></div>
@@ -6163,7 +6259,7 @@ function renderBMCheckin(st) {
       </span>
     </div>`;
 
-  document.getElementById("bm-checkin-body").innerHTML = head + renderBMActualsPanel(st.branchCode, st.snap, st.budget) + secA + secB + secC + secD + actions;
+  document.getElementById("bm-checkin-body").innerHTML = head + (cfg.showBranchPanel ? renderBMActualsPanel(st.branchCode, st.snap, st.budget) : "") + secA + secB + secC + secD + actions;
   if (!ro) {
     document.querySelectorAll("[data-bm-agreed]").forEach(s => s.addEventListener("change", bmRecomputeTotals));
   }
@@ -6290,7 +6386,8 @@ async function showBMTracker(employeeId, year, returnTo) {
   showScreen("bm-tracker");
   const body = document.getElementById("bm-tracker-body");
   body.innerHTML = '<div class="loader"></div>';
-  await loadBmKras();
+  const { data: emp } = await sb.from("profiles").select("job_role").eq("id", employeeId).maybeSingle();
+  await loadBmKras(trackForJobRole(emp && emp.job_role) || "branch_manager");
   await renderBMTracker(body, employeeId, year, returnTo);
 }
 async function renderBMTracker(body, employeeId, year, returnTo) {
@@ -6383,9 +6480,9 @@ async function showBMGuide(returnTo) {
    PRINT / PDF export of a completed check-in
    ========================================================================= */
 async function bmPrintCheckin(checkinId) {
-  await loadBmKras();
   const { data: c, error } = await sb.from("bm_checkins").select("*").eq("id", checkinId).single();
   if (error) { alert("Could not load check-in for printing."); return; }
+  await loadBmKras(c.track || "branch_manager");
   const goals = await bmLoadGoals(c.id);
   const { goals: prevGoals } = await bmLoadReviewGoals(c.employee_id, c.period_year, c.period_month);
   const empName = await bmProfileName(c.employee_id);
