@@ -5466,6 +5466,7 @@ const CHECKIN_TRACKS = {
     sheetTitle: "Sales Performance Check-In",
     subjectLabel: "Salesperson",
     showBranchPanel: false,
+    showSalesPanel: true,
     prework: [
       ["gp",       "GP vs quarterly target — your GP and the target-letter number"],
       ["pipeline", "Pipeline & forecast (ASI Sales Forecast dashboard)"],
@@ -6051,12 +6052,13 @@ async function bmRenderCheckinById(checkinId, mode, returnTo) {
     const execName = c.appraiser_id ? await bmProfileName(c.appraiser_id) : (mode === "exec" ? profile.name : "—");
     // branch financials panel only applies to the branch-manager track
     const branchCode = (track === "branch_manager" && emp) ? emp.branch_code : null;
-    let snap = null, budget = {};
+    let snap = null, budget = {}, salesSnap = null;
     if (branchCode) {
       snap = await loadFinSnapshot();
       budget = await loadExecBudget([branchCode]);
     }
-    bmCheckinState = { checkin: c, kras, goals, prevGoals, prevCheckin: prev, empName, execName, mode, returnTo, branchCode, snap, budget, track };
+    if (track === "sales") salesSnap = await loadSalesSnapshot();
+    bmCheckinState = { checkin: c, kras, goals, prevGoals, prevCheckin: prev, empName, execName, mode, returnTo, branchCode, snap, budget, track, salesSnap };
     renderBMCheckin(bmCheckinState);
   } catch (err) {
     body.innerHTML = `<div class="notice error">Could not load check-in: ${escapeHtml(err.message || String(err))}</div>`;
@@ -6147,6 +6149,47 @@ function renderBMActualsPanel(branchCode, snap, budget) {
       ${clients.length ? `<h4 style="margin:14px 0 4px;font-size:13px;color:var(--brand);">Top clients — actual, rolling 12 m${Object.keys(ser).length?` <span style="color:var(--muted);font-weight:400;font-size:11px;">· trend ${escapeHtml(months[0]||"")}→${escapeHtml(months[months.length-1]||"")}</span>`:""}</h4>
       <div style="overflow-x:auto;"><table class="dt" style="margin:0;min-width:480px;"><thead><tr><th>Client</th><th style="text-align:right;">Revenue</th><th style="text-align:right;">% of branch</th><th style="text-align:center;">Trend · 12 m</th></tr></thead><tbody>${clientRows}</tbody></table></div>` : ""}
       <div style="font-size:11.5px;color:var(--muted);margin-top:8px;">EBITDA shown is branch EBITDA before head-office fees. Context for the <strong>Branch Profitability</strong> and <strong>Sales Performance</strong> ratings. You still assign the 1–10 scores.</div>
+    </div>`;
+}
+
+// Sales performance panel for a sales check-in — from the Sales Performance
+// Dashboard (sales_snapshot), matched by the salesperson's name.
+function renderSalesActualsPanel(name, snap) {
+  const reps = (snap && snap.reps) || {};
+  const rep = reps[name];
+  if (!rep) {
+    return `<div class="notice info" style="margin:12px 0;">No Sales Performance Dashboard figures for <strong>${escapeHtml(name)}</strong>. Only sales-target-letter reps are fed; rebuild the scorecard and run <code>push_sales_snapshot.py</code> to refresh.</div>`;
+  }
+  const money = v => execFmtR(v);
+  const vsColor = v => v == null ? "var(--muted)" : (v >= 100 ? "#12b76a" : (v >= 70 ? "#f79009" : "#f04438"));
+  const qentries = Object.entries(rep.quarters || {}).sort((a, b) => a[0].localeCompare(b[0]));
+  const latest = qentries.length ? qentries[qentries.length - 1][1] : {};
+  const latestVs = latest.tgt ? (latest.gp / latest.tgt * 100) : null;
+  const qrows = qentries.slice(-4).map(([ql, q]) => {
+    const vs = q.tgt ? (q.gp / q.tgt * 100) : null;
+    return `<tr><td>${escapeHtml(ql)}${q.n < 3 ? ` <span style="color:var(--muted);font-size:11px;">(${q.n} mo)</span>` : ""}</td>`
+      + `<td style="text-align:right;">${money(q.gp)}</td><td style="text-align:right;">${money(q.tgt)}</td>`
+      + `<td style="text-align:right;color:${vsColor(vs)};font-weight:700;">${vs == null ? "—" : vs.toFixed(0) + "%"}</td></tr>`;
+  }).join("");
+  const series = rep.series || [];
+  const gpSeries = series.map(s => s.gp);
+  const monthLabels = series.map(s => s.p.slice(5) + " ");
+  const wr = rep.conv ? rep.conv.winRate : null;
+  const pipeW = rep.pipeline ? rep.pipeline.openW : null;
+  return `
+    <div style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin:14px 0;background:#f7f9fc;">
+      <div style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;font-weight:600;">Sales performance · ${escapeHtml(name)}${rep.branch ? " · " + escapeHtml(rep.branch) : ""} · as at ${escapeHtml((snap.asof && snap.asof.inv) || snap.payroll_to || "")}</div>
+      <div style="display:flex;align-items:baseline;gap:18px;flex-wrap:wrap;margin-top:6px;">
+        <div><span style="font-size:22px;font-weight:800;color:${vsColor(latestVs)};letter-spacing:-0.02em;">${latestVs == null ? "—" : latestVs.toFixed(0) + "%"}</span> <span style="font-size:12px;color:var(--muted);">GP vs target · latest qtr</span></div>
+        <div style="font-size:13px;">GP <strong>${money(latest.gp || 0)}</strong> / target ${money(latest.tgt || 0)}</div>
+        <div style="font-size:13px;">Win rate <strong>${wr != null ? wr.toFixed(0) + "%" : "—"}</strong></div>
+        <div style="font-size:13px;">Weighted pipeline <strong>${money(pipeW || 0)}</strong></div>
+      </div>
+      <h4 style="margin:12px 0 2px;font-size:13px;color:var(--brand);">Monthly GP (actual)</h4>
+      ${bmLineChart(gpSeries, monthLabels, "#7b2fbe")}
+      <h4 style="margin:12px 0 4px;font-size:13px;color:var(--brand);">GP vs target by quarter</h4>
+      <div style="overflow-x:auto;"><table class="dt" style="margin:0;min-width:420px;"><thead><tr><th>Quarter</th><th style="text-align:right;">GP</th><th style="text-align:right;">Target</th><th style="text-align:right;">vs target</th></tr></thead><tbody>${qrows}</tbody></table></div>
+      <div style="font-size:11.5px;color:var(--muted);margin-top:8px;">Source: Sales Performance Dashboard — GP after direct labour; targets = 3× monthly from the sales target letters. 12-month won value ${money((rep.conv && rep.conv.wonV) || 0)}. Debtors not fed here — rate from Acumatica AR. You still assign the 1–10 scores.</div>
     </div>`;
 }
 
@@ -6259,7 +6302,7 @@ function renderBMCheckin(st) {
       </span>
     </div>`;
 
-  document.getElementById("bm-checkin-body").innerHTML = head + (cfg.showBranchPanel ? renderBMActualsPanel(st.branchCode, st.snap, st.budget) : "") + secA + secB + secC + secD + actions;
+  document.getElementById("bm-checkin-body").innerHTML = head + (cfg.showBranchPanel ? renderBMActualsPanel(st.branchCode, st.snap, st.budget) : (cfg.showSalesPanel ? renderSalesActualsPanel(st.empName, st.salesSnap) : "")) + secA + secB + secC + secD + actions;
   if (!ro) {
     document.querySelectorAll("[data-bm-agreed]").forEach(s => s.addEventListener("change", bmRecomputeTotals));
   }
@@ -6651,6 +6694,16 @@ async function loadFinSnapshot() {
   const { data, error } = await sb.from("fin_snapshot").select("*").eq("id", "latest").maybeSingle();
   if (error) { console.warn("[fin_snapshot]", error); return null; }
   finSnapshotCache = data;
+  return data;
+}
+// Per-salesperson sales actuals (GP vs target, conversion, pipeline) from the
+// Sales Performance Dashboard, pushed to sales_snapshot by push_sales_snapshot.py.
+let salesSnapshotCache = null;
+async function loadSalesSnapshot() {
+  if (salesSnapshotCache) return salesSnapshotCache;
+  const { data, error } = await sb.from("sales_snapshot").select("*").eq("id", "latest").maybeSingle();
+  if (error) { console.warn("[sales_snapshot]", error); return null; }
+  salesSnapshotCache = data;
   return data;
 }
 // 12 monthly values (Oct..Sep) -> 4 quarter sums
