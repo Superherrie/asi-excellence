@@ -6176,6 +6176,24 @@ function renderSalesActualsPanel(name, snap) {
   const monthLabels = series.map(s => s.p.slice(5) + " ");
   const wr = rep.conv ? rep.conv.winRate : null;
   const pipeW = rep.pipeline ? rep.pipeline.openW : null;
+  // Quotes breakdown — won/lost are 12-month rolling; open is the current pipeline.
+  const conv = rep.conv || {}, pipe = rep.pipeline || {};
+  const wonN = conv.wonN || 0, lostN = conv.lostN || 0, openN = pipe.openN || 0;
+  const wonV = conv.wonV || 0, lostV = conv.lostV || 0, openV = pipe.openV || 0;
+  const totN = wonN + lostN + openN, totV = wonV + lostV + openV;
+  const wrV = (wonV + lostV) ? (wonV / (wonV + lostV) * 100) : null;
+  const qRow = (label, n, v, note) =>
+    `<tr><td>${label}${note ? ` <span style="color:var(--muted);font-size:11px;">${note}</span>` : ""}</td>`
+    + `<td style="text-align:right;">${n}</td><td style="text-align:right;">${money(v)}</td></tr>`;
+  const quotesBlock = `
+      <h4 style="margin:12px 0 4px;font-size:13px;color:var(--brand);">Quotes — count & value</h4>
+      <div style="overflow-x:auto;"><table class="dt" style="margin:0;min-width:360px;"><thead><tr><th>Status</th><th style="text-align:right;">Quotes</th><th style="text-align:right;">Value</th></tr></thead><tbody>
+        ${qRow("Won", wonN, wonV, "· 12 m")}
+        ${qRow("Lost", lostN, lostV, "· 12 m")}
+        ${qRow("Open", openN, openV, "· pipeline")}
+        <tr style="font-weight:700;border-top:2px solid var(--border);"><td>Total</td><td style="text-align:right;">${totN}</td><td style="text-align:right;">${money(totV)}</td></tr>
+      </tbody></table></div>
+      <div style="font-size:11.5px;color:var(--muted);margin-top:4px;">Win rate by value <strong>${wrV != null ? wrV.toFixed(0) + "%" : "—"}</strong> (won ÷ won+lost, 12 m). Weighted open pipeline ${money(pipe.openW || 0)}${pipe.staleV ? ` · stale opens ${money(pipe.staleV)}` : ""}.</div>`;
   return `
     <div style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin:14px 0;background:#f7f9fc;">
       <div style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;font-weight:600;">Sales performance · ${escapeHtml(name)}${rep.branch ? " · " + escapeHtml(rep.branch) : ""} · as at ${escapeHtml((snap.asof && snap.asof.inv) || snap.payroll_to || "")}</div>
@@ -6185,6 +6203,7 @@ function renderSalesActualsPanel(name, snap) {
         <div style="font-size:13px;">Win rate <strong>${wr != null ? wr.toFixed(0) + "%" : "—"}</strong></div>
         <div style="font-size:13px;">Weighted pipeline <strong>${money(pipeW || 0)}</strong></div>
       </div>
+      ${quotesBlock}
       <h4 style="margin:12px 0 2px;font-size:13px;color:var(--brand);">Monthly GP (actual)</h4>
       ${bmLineChart(gpSeries, monthLabels, "#7b2fbe")}
       <h4 style="margin:12px 0 4px;font-size:13px;color:var(--brand);">GP vs target by quarter</h4>
