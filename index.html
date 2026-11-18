@@ -6053,13 +6053,19 @@ async function bmRenderCheckinById(checkinId, mode, returnTo) {
     // branch financials panel only applies to the branch-manager track
     const branchCode = (track === "branch_manager" && emp) ? emp.branch_code : null;
     let snap = null, budget = {}, salesSnap = null;
-    if (branchCode) {
-      snap = await loadFinSnapshot();
-      budget = await loadExecBudget([branchCode]);
+    // Signed-off appraisals show the figures frozen at sign-off, not today's live
+    // numbers. Older sign-offs without a snapshot fall back to live (best effort).
+    const frozen = c.status === "signed_off" && c.data_snapshot && (c.data_snapshot.snap || c.data_snapshot.salesSnap);
+    if (frozen) {
+      const ds = c.data_snapshot;
+      snap = ds.snap || null; budget = ds.budget || {}; salesSnap = ds.salesSnap || null;
+    } else {
+      if (branchCode) { snap = await loadFinSnapshot(); budget = await loadExecBudget([branchCode]); }
+      if (track === "sales") salesSnap = await loadSalesSnapshot();
     }
-    if (track === "sales") salesSnap = await loadSalesSnapshot();
     const empBranchCode = emp ? emp.branch_code : null;
-    bmCheckinState = { checkin: c, kras, goals, prevGoals, prevCheckin: prev, empName, execName, mode, returnTo, branchCode, empBranchCode, snap, budget, track, salesSnap };
+    bmCheckinState = { checkin: c, kras, goals, prevGoals, prevCheckin: prev, empName, execName, mode, returnTo, branchCode, empBranchCode, snap, budget, track, salesSnap,
+      frozen: !!frozen, frozenAt: frozen ? c.data_snapshot.captured_at : null };
     renderBMCheckin(bmCheckinState);
   } catch (err) {
     body.innerHTML = `<div class="notice error">Could not load check-in: ${escapeHtml(err.message || String(err))}</div>`;
@@ -6256,6 +6262,31 @@ function renderSalesCommentary(name, snap) {
     </div>`;
 }
 
+// Trimmed, point-in-time copy of the stats panel for a check-in, stored on the
+// record at sign-off so a reopened appraisal shows the data it was rated against.
+function buildCheckinDataSnapshot(st) {
+  const captured_at = new Date().toISOString();
+  if (st.track === "sales") {
+    const s = st.salesSnap || {}, name = st.empName;
+    return { track: "sales", empName: name, captured_at, salesSnap: {
+      reps: (s.reps && s.reps[name]) ? { [name]: s.reps[name] } : {},
+      commentary: (s.commentary && s.commentary[name]) ? { [name]: s.commentary[name] } : {},
+      commentary_asof: s.commentary_asof || null, asof: s.asof || null, payroll_to: s.payroll_to || null } };
+  }
+  const code = st.branchCode, s = st.snap || {};
+  return { track: "branch_manager", branchCode: code, captured_at,
+    snap: {
+      branches:  (s.branches  && code && s.branches[code])  ? { [code]: s.branches[code] }  : {},
+      customers: (s.customers && code && s.customers[code]) ? { [code]: s.customers[code] } : {},
+      meta: s.meta || {} },
+    budget: (st.budget && code && st.budget[code]) ? { [code]: st.budget[code] } : {} };
+}
+// Small banner shown above a panel when its figures are frozen at sign-off.
+function frozenNote(frozenAt) {
+  if (!frozenAt) return "";
+  return `<div class="notice info" style="margin:12px 0 0;font-size:12px;">📌 Figures below are the snapshot captured at sign-off (${escapeHtml(bmFmtDateTime(frozenAt))}) — the data this appraisal was rated against, not today's live numbers.</div>`;
+}
+
 function renderBMCheckin(st) {
   const c = st.checkin;
   const cfg = CHECKIN_TRACKS[st.track] || CHECKIN_TRACKS.branch_manager;
@@ -6365,7 +6396,10 @@ function renderBMCheckin(st) {
       </span>
     </div>`;
 
-  document.getElementById("bm-checkin-body").innerHTML = head + (cfg.showBranchPanel ? renderBMActualsPanel(st.branchCode, st.snap, st.budget) : (cfg.showSalesPanel ? renderSalesActualsPanel(st.empName, st.salesSnap) + renderSalesCommentary(st.empName, st.salesSnap) : "")) + secA + secB + secC + secD + actions;
+  const panel = cfg.showBranchPanel ? renderBMActualsPanel(st.branchCode, st.snap, st.budget)
+    : (cfg.showSalesPanel ? renderSalesActualsPanel(st.empName, st.salesSnap) + renderSalesCommentary(st.empName, st.salesSnap) : "");
+  const panelBlock = panel ? (st.frozen ? frozenNote(st.frozenAt) : "") + panel : "";
+  document.getElementById("bm-checkin-body").innerHTML = head + panelBlock + secA + secB + secC + secD + actions;
   if (!ro) {
     document.querySelectorAll("[data-bm-agreed]").forEach(s => s.addEventListener("change", bmRecomputeTotals));
   }
@@ -6451,6 +6485,7 @@ async function bmExecSave(signoff) {
   setMessage(msgId, "Saving…", "info");
   try {
     const upd = Object.assign({ agreed_ratings: agreed, evidence, prework, check_in_date: checkDate, status }, signFields || {});
+    if (signoff) upd.data_snapshot = buildCheckinDataSnapshot(st);  // freeze the stats panel with the appraisal
     const { error } = await sb.from("bm_checkins").update(upd).eq("id", st.checkin.id);
     if (error) throw error;
 
@@ -6901,13 +6936,16 @@ async function execRenderById(scorecardId, returnTo) {
     const goals = await execLoadGoals(c.id);
     const { goals: prevGoals } = await execLoadReviewGoals(c.exec_id, c.scorecard_type, c.period_year, c.period_quarter);
     const execName = rosterEntry.name;
-    // financial data for operational execs: actuals snapshot + FY27 budget
+    // financial data for operational execs: actuals snapshot + FY27 budget.
+    // Signed-off scorecards show the figures frozen at sign-off; otherwise live.
     let snap = null, budget = {};
+    const frozen = c.status === "signed_off" && c.data_snapshot && c.data_snapshot.snap;
     if (!execIsFinance(c.scorecard_type) && rosterEntry.ccs.length) {
-      snap = await loadFinSnapshot();
-      budget = await loadExecBudget(rosterEntry.ccs);
+      if (frozen) { snap = c.data_snapshot.snap || null; budget = c.data_snapshot.budget || {}; }
+      else { snap = await loadFinSnapshot(); budget = await loadExecBudget(rosterEntry.ccs); }
     }
-    execState = { card: c, kpis, goals, prevGoals, execName, ccs: rosterEntry.ccs, type: c.scorecard_type, snap, budget, returnTo };
+    execState = { card: c, kpis, goals, prevGoals, execName, ccs: rosterEntry.ccs, type: c.scorecard_type, snap, budget, returnTo,
+      frozen: !!frozen, frozenAt: frozen ? c.data_snapshot.captured_at : null };
     renderExecScorecard(execState);
   } catch (err) {
     body.innerHTML = `<div class="notice error">Could not load scorecard: ${escapeHtml(err.message || String(err))}</div>`;
@@ -6950,6 +6988,15 @@ function execSparkline(series, color) {
   return `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true">`
     + `<polyline fill="none" stroke="${color}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" points="${pts}"/>`
     + `<circle cx="${lx}" cy="${ly}" r="1.9" fill="${color}"/></svg>`;
+}
+// Trimmed copy of the exec financial-results panel (actuals slice + budget for
+// this exec's cost centres), frozen on the scorecard at sign-off.
+function buildExecDataSnapshot(st) {
+  const s = st.snap || {}, ccs = st.ccs || [];
+  const pick = obj => { const o = {}; ccs.forEach(c => { if (obj && obj[c] != null) o[c] = obj[c]; }); return o; };
+  return { captured_at: new Date().toISOString(),
+    snap: { branches: pick(s.branches), customers: pick(s.customers), meta: s.meta || {} },
+    budget: st.budget || {} };
 }
 function renderExecActualsPanel(st) {
   if (execIsFinance(st.type)) {
@@ -7049,7 +7096,7 @@ function renderExecScorecard(st) {
       <div class="field"><label>Review date</label><input type="date" id="exec-review-date" value="${c.review_date || ""}" ${dis}></div>
     </div>
     <div style="display:flex;align-items:center;gap:10px;"><span class="status-pill">${escapeHtml(EXEC_STATUS_LABEL[c.status] || c.status)}</span></div>
-    ${renderExecActualsPanel(st)}`;
+    ${st.frozen ? frozenNote(st.frozenAt) : ""}${renderExecActualsPanel(st)}`;
 
   const secA = `
     <h3 style="margin:18px 0 6px;font-size:15px;color:var(--brand);">A · Review of last quarter's goals</h3>
@@ -7180,6 +7227,7 @@ async function execSave(signoff) {
   try {
     const upd = Object.assign({ agreed_ratings: agreed, evidence, review_date: reviewDate, status,
       actuals: st.card.actuals || {} }, signFields || {});
+    if (signoff) upd.data_snapshot = buildExecDataSnapshot(st);  // freeze the financial-results panel
     const { error } = await sb.from("exec_scorecards").update(upd).eq("id", st.card.id);
     if (error) throw error;
     for (const g of st.prevGoals) {
