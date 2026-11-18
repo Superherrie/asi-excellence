@@ -6058,7 +6058,8 @@ async function bmRenderCheckinById(checkinId, mode, returnTo) {
       budget = await loadExecBudget([branchCode]);
     }
     if (track === "sales") salesSnap = await loadSalesSnapshot();
-    bmCheckinState = { checkin: c, kras, goals, prevGoals, prevCheckin: prev, empName, execName, mode, returnTo, branchCode, snap, budget, track, salesSnap };
+    const empBranchCode = emp ? emp.branch_code : null;
+    bmCheckinState = { checkin: c, kras, goals, prevGoals, prevCheckin: prev, empName, execName, mode, returnTo, branchCode, empBranchCode, snap, budget, track, salesSnap };
     renderBMCheckin(bmCheckinState);
   } catch (err) {
     body.innerHTML = `<div class="notice error">Could not load check-in: ${escapeHtml(err.message || String(err))}</div>`;
@@ -6067,21 +6068,47 @@ async function bmRenderCheckinById(checkinId, mode, returnTo) {
 
 function bmKraLabel(key) { const k = bmKras.find(x => x.kra_key === key); return k ? k.label : (key ? key : "General"); }
 
-// Larger inline-SVG line chart for a branch's 12-month revenue.
+// Branch cost-centre code -> display name (source: fin_snapshot branch names,
+// which come from the Monthly Reporting actuals). Used to prepopulate the
+// check-in Branch field from the appraisee's payroll branch_code.
+const BRANCH_NAMES = {
+  "000": "Head Office", CAP: "Service Desk", CPT: "Cape Town", DBN: "Durban",
+  DCS: "Data Centres", ESL: "Eastern Cape", GAU: "Gauteng", KAT: "Kathu",
+  MDB: "Middelburg", MED: "Medical", RCH: "Richards Bay", RST: "Rustenburg",
+  SEC: "Secunda", VEN: "Vereeniging National", VER: "Vereeniging Industrial", ZZZ: "Wastage",
+};
+function branchName(code) { return code ? (BRANCH_NAMES[code] || code) : ""; }
+
+// Short Rand axis label, e.g. R0 / R250k / R1.2m.
+function fmtAxisR(v) {
+  v = +v || 0; const s = v < 0 ? "-" : ""; const x = Math.abs(v);
+  if (x >= 1e6) return s + "R" + (x / 1e6).toFixed(x >= 1e7 ? 0 : 1) + "m";
+  if (x >= 1e3) return s + "R" + Math.round(x / 1e3) + "k";
+  return s + "R" + Math.round(x);
+}
+// Larger inline-SVG line chart for a branch's 12-month revenue, with a Rand value axis.
 function bmLineChart(values, monthLabels, color) {
   const a = (values || []).map(x => +x || 0);
   const n = a.length;
   if (!n) return "";
-  const w = 560, h = 132, padL = 8, padR = 8, padT = 12, padB = 20;
-  const mx = Math.max(...a), mn = Math.min(...a, 0), span = (mx - mn) || 1;
+  const w = 560, h = 140, padL = 48, padR = 10, padT = 12, padB = 22;
+  const mx = Math.max(...a, 0), mn = Math.min(...a, 0), span = (mx - mn) || 1;
   const X = i => padL + (n === 1 ? (w - padL - padR) / 2 : i * (w - padL - padR) / (n - 1));
   const Y = v => h - padB - (v - mn) / span * (h - padT - padB);
+  // horizontal gridlines + Rand labels (5 steps from min to max)
+  const steps = 4; let grid = "", ylab = "";
+  for (let s = 0; s <= steps; s++) {
+    const val = mn + span * s / steps, y = Y(val);
+    grid += `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${w - padR}" y2="${y.toFixed(1)}" stroke="#E6E9EF" stroke-width="1"/>`;
+    ylab += `<text x="${(padL - 6)}" y="${(y + 3).toFixed(1)}" font-size="9" fill="#6E7682" text-anchor="end">${fmtAxisR(val)}</text>`;
+  }
   const line = a.map((v, i) => `${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(" ");
-  const area = `${X(0).toFixed(1)},${h - padB} ${line} ${X(n - 1).toFixed(1)},${h - padB}`;
+  const area = `${X(0).toFixed(1)},${(h - padB)} ${line} ${X(n - 1).toFixed(1)},${(h - padB)}`;
   const dots = a.map((v, i) => `<circle cx="${X(i).toFixed(1)}" cy="${Y(v).toFixed(1)}" r="2.1" fill="${color}"/>`).join("");
   const ticks = (monthLabels || []).map((m, i) => i % 2 === 0
     ? `<text x="${X(i).toFixed(1)}" y="${h - 6}" font-size="9" fill="#6E7682" text-anchor="middle">${escapeHtml((m || "").split(" ")[0])}</text>` : "").join("");
   return `<svg viewBox="0 0 ${w} ${h}" width="100%" style="max-width:${w}px;height:auto;display:block;" role="img" aria-label="Monthly revenue line chart">`
+    + grid + ylab
     + `<polygon points="${area}" fill="${color}" opacity="0.08"/>`
     + `<polyline points="${line}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`
     + `${dots}${ticks}</svg>`;
@@ -6212,6 +6239,23 @@ function renderSalesActualsPanel(name, snap) {
     </div>`;
 }
 
+// Claude's written sales commentary for this salesperson (from the Sales
+// Performance Dashboard), matched by name. Shows even when the rep has no
+// dashboard figures, since commentary covers more reps than the fed set.
+function renderSalesCommentary(name, snap) {
+  const text = snap && snap.commentary && snap.commentary[name];
+  if (!text) return "";
+  const asof = (snap && snap.commentary_asof) || "";
+  const paras = String(text).split(/\n{2,}/).map(p =>
+    `<p style="margin:0 0 8px;">${escapeHtml(p.trim())}</p>`).join("");
+  return `
+    <div style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin:14px 0;background:#fffaf2;">
+      <div style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;font-weight:600;">Sales commentary${asof ? " · as at " + escapeHtml(asof) : ""}</div>
+      <div style="font-size:13px;line-height:1.5;margin-top:6px;">${paras}</div>
+      <div style="font-size:11.5px;color:var(--muted);margin-top:4px;">AI-written from the Sales Performance Dashboard — context for the discussion, not a rating.</div>
+    </div>`;
+}
+
 function renderBMCheckin(st) {
   const c = st.checkin;
   const cfg = CHECKIN_TRACKS[st.track] || CHECKIN_TRACKS.branch_manager;
@@ -6233,7 +6277,7 @@ function renderBMCheckin(st) {
     </div>
     <div class="field-row">
       <div class="field"><label>Month</label><input value="${escapeHtml(bmMonthLabel(c.period_year, c.period_month))}" disabled></div>
-      <div class="field"><label>Branch</label><input id="bm-branch" value="${escapeHtml(pw.branch || "")}" ${dis} placeholder="Branch name"></div>
+      <div class="field"><label>Branch</label><input id="bm-branch" value="${escapeHtml(pw.branch || branchName(st.empBranchCode))}" ${dis} placeholder="Branch name"></div>
     </div>
     <div class="field-row">
       <div class="field"><label>Check-in date</label><input type="date" id="bm-checkin-date" value="${c.check_in_date || ""}" ${dis}></div>
@@ -6321,7 +6365,7 @@ function renderBMCheckin(st) {
       </span>
     </div>`;
 
-  document.getElementById("bm-checkin-body").innerHTML = head + (cfg.showBranchPanel ? renderBMActualsPanel(st.branchCode, st.snap, st.budget) : (cfg.showSalesPanel ? renderSalesActualsPanel(st.empName, st.salesSnap) : "")) + secA + secB + secC + secD + actions;
+  document.getElementById("bm-checkin-body").innerHTML = head + (cfg.showBranchPanel ? renderBMActualsPanel(st.branchCode, st.snap, st.budget) : (cfg.showSalesPanel ? renderSalesActualsPanel(st.empName, st.salesSnap) + renderSalesCommentary(st.empName, st.salesSnap) : "")) + secA + secB + secC + secD + actions;
   if (!ro) {
     document.querySelectorAll("[data-bm-agreed]").forEach(s => s.addEventListener("change", bmRecomputeTotals));
   }
